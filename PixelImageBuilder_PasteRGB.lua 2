@@ -1,0 +1,5954 @@
+print("[PixelBuilder] boot")
+
+local Players=game:GetService("Players")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local UserInputService=game:GetService("UserInputService")
+
+local Player=Players.LocalPlayer
+if not Player then
+	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	Player=Players.LocalPlayer
+end
+
+local PlayerGui=Player:WaitForChild("PlayerGui")
+
+-- Dependency game: diisi ASYNC setelah GUI jadi (GUI tidak pernah ketahan WaitForChild)
+local PlacerBloc,DeleteBloc,Colorie,BitBuffer
+local Blocs,PosOriginPart
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local FauxBlocsDetruits=
+	ReplicatedStorage:FindFirstChild(
+		"FauxBlocsDetruits"
+	)
+
+if not FauxBlocsDetruits then
+
+	FauxBlocsDetruits=
+		Instance.new("Folder")
+
+	FauxBlocsDetruits.Name=
+		"FauxBlocsDetruits"
+
+	FauxBlocsDetruits.Parent=
+		ReplicatedStorage
+
+end
+
+local BLOCK_ID="79"
+
+local GRANDEUR_BLOC=3
+
+-- Default grid & playback (kalau file TANPA header)
+local DEFAULT_X_SIZE=51
+local DEFAULT_Y_SIZE=39
+local DEFAULT_FPS=20
+
+local X_SIZE=DEFAULT_X_SIZE
+local Y_SIZE=DEFAULT_Y_SIZE
+local TOTAL_BLOCKS=X_SIZE*Y_SIZE
+
+local function RecalcGridSize()
+	X_SIZE=math.clamp(math.floor(X_SIZE),1,128)
+	Y_SIZE=math.clamp(math.floor(Y_SIZE),1,128)
+	TOTAL_BLOCKS=X_SIZE*Y_SIZE
+end
+
+local STARTUP_URL=""
+
+local STARTUP_DURATION=5
+
+local BAD_APPLE_URL=
+	"https://raw.githubusercontent.com/niikkzx/Plane-Crazy/main/badapple"
+
+local RGB_URL=""
+local RGB_DATA=""
+
+local CUSTOM_BA_URL=""
+
+local START_X=0
+local START_Y=0
+local START_Z=0
+
+local COLOR_ENABLED=true
+
+-- 20 FPS default → delay 0.05s; FPS lebih rendah = jeda lebih panjang (efek skip/choppy OK)
+local DEFAULT_FRAME_DELAY=1/DEFAULT_FPS
+local FRAME_DELAY=DEFAULT_FRAME_DELAY
+-- Delay terpisah: startup vs konten utama (header beda file)
+local StartupFrameDelay=DEFAULT_FRAME_DELAY
+local MainFrameDelay=DEFAULT_FRAME_DELAY
+local LastParsedFps=nil
+-- nil = ikut header file; angka = paksa FPS
+local UserFpsOverride=nil
+-- dimensi sumber dari header media (untuk auto-resize)
+local MediaSrcW=nil
+local MediaSrcH=nil
+local StartupMissing=false
+
+local PAINT_BATCH=48
+local PAINT_WORKERS=24
+
+local BUILD_WORKERS=512
+local BUILD_BATCH=256
+
+local DELETE_WORKERS=300
+local DELETE_BATCH=600
+
+local CUSTOM_BRIGHTNESS=0
+
+local BUILD_RESCAN_DELAY=0.2
+local BUILD_RESCAN_ATTEMPTS=20
+
+-- Radius toleransi posisi Box vs grid ideal.
+-- 1.75 terlalu ketat: Box multi-cell / PivotOffset / float drift
+-- setelah SET POS sering reject. Set ke ~0.95 * GRANDEUR_BLOC.
+local SCAN_RADIUS=2.85
+
+-- false = tanpa spam console (lebih ringan di device lemah)
+local DEBUG_LOG=false
+
+local function Dbg(...)
+	if DEBUG_LOG then
+		print(...)
+	end
+end
+
+local Building=false
+local Playing=false
+local Scanning=false
+local Deleting=false
+local SettingPos=false
+local StopRequested=false
+
+local PendingStartX=0
+local PendingStartY=0
+local PendingStartZ=0
+
+local RunToken=0
+
+local BadAppleFrames=nil
+local StartupFrames=nil
+local RGBFrames=nil
+local CustomBAFrames=nil
+
+local Blocks={}
+local PreviousPixels={}
+
+do
+	local function KillOld(Host)
+		if Host then
+			local Old=Host:FindFirstChild("PixelImageBuilder")
+			if Old then
+				pcall(function()
+					Old:Destroy()
+				end)
+			end
+		end
+	end
+	KillOld(PlayerGui)
+	pcall(function()
+		KillOld(game:GetService("CoreGui"))
+	end)
+	pcall(function()
+		if gethui then
+			KillOld(gethui())
+		end
+	end)
+end
+
+
+
+
+
+
+
+
+local Gui=
+	Instance.new("ScreenGui")
+
+Gui.Name="PixelImageBuilder"
+Gui.ResetOnSpawn=false
+Gui.IgnoreGuiInset=true
+Gui.DisplayOrder=999999
+Gui.ZIndexBehavior=
+	Enum.ZIndexBehavior.Sibling
+
+Gui.Enabled=true
+
+do
+	-- default PlayerGui; kalau gagal -> gethui() -> CoreGui
+	local OK=pcall(function()
+		Gui.Parent=PlayerGui
+	end)
+	if not OK or Gui.Parent~=PlayerGui then
+		pcall(function()
+			if gethui then
+				Gui.Parent=gethui()
+			end
+		end)
+		if not Gui.Parent then
+			pcall(function()
+				Gui.Parent=game:GetService("CoreGui")
+			end)
+		end
+	end
+	print("[PixelBuilder] GUI parent:",Gui.Parent and Gui.Parent:GetFullName() or "NIL")
+end
+
+local Window=
+	Instance.new("Frame")
+
+Window.Name="Window"
+
+Window.Size=
+	UDim2.new(
+		0,
+		275,
+		0.70,
+		0
+	)
+
+Window.Position=
+	UDim2.new(
+		0,
+		12,
+		0.5,
+		0
+	)
+
+Window.AnchorPoint=
+	Vector2.new(
+		0,
+		0.5
+	)
+
+Window.BackgroundColor3=
+	Color3.fromRGB(
+		17,
+		23,
+		34
+	)
+
+Window.BorderSizePixel=0
+Window.Active=true
+Window.ClipsDescendants=true
+Window.Parent=Gui
+
+do
+local WindowConstraint=
+	Instance.new("UISizeConstraint")
+
+WindowConstraint.MinSize=
+	Vector2.new(
+		205,
+		280
+	)
+
+WindowConstraint.MaxSize=
+	Vector2.new(
+		360,
+		560
+	)
+
+WindowConstraint.Parent=Window
+
+local WindowCorner=
+	Instance.new("UICorner")
+
+WindowCorner.CornerRadius=
+	UDim.new(
+		0,
+		12
+	)
+
+WindowCorner.Parent=Window
+
+local Stroke=
+	Instance.new("UIStroke")
+
+Stroke.Thickness=1
+Stroke.Transparency=0.35
+Stroke.Parent=Window
+end
+
+local DragButton
+do
+local Header=
+	Instance.new("Frame")
+
+Header.Size=
+	UDim2.new(
+		1,
+		0,
+		0,
+		38
+	)
+
+Header.BackgroundTransparency=1
+Header.Active=true
+Header.ZIndex=2
+Header.Parent=Window
+
+local Title=
+	Instance.new("TextLabel")
+
+Title.Size=
+	UDim2.new(
+		1,
+		-16,
+		1,
+		0
+	)
+
+Title.Position=
+	UDim2.fromOffset(
+		8,
+		0
+	)
+
+Title.BackgroundTransparency=1
+Title.Text="PIXEL IMAGE BUILDER"
+
+Title.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+Title.TextSize=14
+Title.Font=
+	Enum.Font.GothamBold
+
+Title.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+Title.Parent=Header
+
+DragButton=
+	Instance.new("TextButton")
+
+DragButton.Size=
+	UDim2.fromScale(
+		1,
+		1
+	)
+
+DragButton.BackgroundTransparency=1
+DragButton.Text=""
+DragButton.AutoButtonColor=false
+DragButton.ZIndex=3
+DragButton.Parent=Header
+end
+
+local Status=
+	Instance.new("TextLabel")
+
+Status.Size=
+	UDim2.new(
+		1,
+		-16,
+		0,
+		24
+	)
+
+Status.Position=
+	UDim2.fromOffset(
+		8,
+		38
+	)
+
+Status.BackgroundTransparency=1
+Status.Text="READY"
+
+Status.TextColor3=
+	Color3.fromRGB(
+		180,
+		180,
+		190
+	)
+
+Status.TextSize=10
+Status.Font=Enum.Font.Code
+Status.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+Status.TextTruncate=
+	Enum.TextTruncate.AtEnd
+
+Status.Parent=Window
+
+local function DepsReady()
+	if PlacerBloc and DeleteBloc and Colorie and BitBuffer and Blocs and PosOriginPart then
+		return true
+	end
+	Status.Text="DEPENDENCY BELUM SIAP"
+	return false
+end
+
+task.spawn(function()
+	Status.Text="LOADING DEPENDENCY..."
+
+	local Events=ReplicatedStorage:WaitForChild("Events",30)
+	if Events then
+		PlacerBloc=Events:WaitForChild("PlacerBloc",30)
+		DeleteBloc=Events:WaitForChild("DeleteBloc",30)
+		Colorie=Events:WaitForChild("RemoteEventColorie",30)
+	end
+
+	local Modules=ReplicatedStorage:WaitForChild("Modules",30)
+	local BitBufferModule=Modules and Modules:WaitForChild("BitBuffer",30)
+	if BitBufferModule then
+		local OK,Result=pcall(require,BitBufferModule)
+		if OK then
+			BitBuffer=Result
+		else
+			warn("[PixelBuilder] require BitBuffer gagal:",Result)
+		end
+	end
+
+	Blocs=workspace:WaitForChild("Blocs",30)
+	PosOriginPart=workspace:WaitForChild("PosOrigin",30)
+
+	local Missing={}
+	if not Events then table.insert(Missing,"ReplicatedStorage.Events") end
+	if not PlacerBloc then table.insert(Missing,"PlacerBloc") end
+	if not DeleteBloc then table.insert(Missing,"DeleteBloc") end
+	if not Colorie then table.insert(Missing,"RemoteEventColorie") end
+	if not BitBuffer then table.insert(Missing,"Modules.BitBuffer") end
+	if not Blocs then table.insert(Missing,"workspace.Blocs") end
+	if not PosOriginPart then table.insert(Missing,"workspace.PosOrigin") end
+
+	if #Missing>0 then
+		warn("[PixelBuilder] Dependency tidak ketemu: "..table.concat(Missing,", "))
+		Status.Text="MISSING: "..table.concat(Missing,", ")
+	else
+		Status.Text="READY"
+		print("[PixelBuilder] semua dependency OK")
+	end
+end)
+
+local Content=
+	Instance.new("ScrollingFrame")
+
+Content.Name="Content"
+
+Content.Size=
+	UDim2.new(
+		1,
+		-12,
+		1,
+		-70
+	)
+
+Content.Position=
+	UDim2.fromOffset(
+		6,
+		66
+	)
+
+Content.BackgroundTransparency=1
+Content.BorderSizePixel=0
+
+Content.ScrollBarThickness=5
+Content.ScrollBarImageTransparency=0.15
+
+Content.ScrollingDirection=
+	Enum.ScrollingDirection.Y
+
+Content.CanvasSize=
+	UDim2.new(
+		0,
+		0,
+		0,
+		0
+	)
+
+Content.AutomaticCanvasSize=
+	Enum.AutomaticSize.Y
+
+Content.Active=true
+Content.Parent=Window
+
+do
+local ContentPadding=
+	Instance.new("UIPadding")
+
+ContentPadding.PaddingLeft=
+	UDim.new(0,3)
+
+ContentPadding.PaddingRight=
+	UDim.new(0,3)
+
+ContentPadding.PaddingTop=
+	UDim.new(0,3)
+
+ContentPadding.PaddingBottom=
+	UDim.new(0,10)
+
+ContentPadding.Parent=Content
+
+local ContentLayout=
+	Instance.new("UIListLayout")
+
+ContentLayout.Padding=
+	UDim.new(
+		0,
+		6
+	)
+
+ContentLayout.SortOrder=
+	Enum.SortOrder.LayoutOrder
+
+ContentLayout.Parent=Content
+end
+-- Tombol kecil "BA" untuk munculin / sembunyiin window (kalau window ilang / kegeser)
+do
+	local Toggle=Instance.new("TextButton")
+	Toggle.Name="Toggle"
+	Toggle.Size=UDim2.fromOffset(38,38)
+	Toggle.AnchorPoint=Vector2.new(1,0.5)
+	Toggle.Position=UDim2.new(1,-8,0.5,0)
+	Toggle.BackgroundColor3=Color3.fromRGB(48,48,58)
+	Toggle.BorderSizePixel=0
+	Toggle.Text="PB"
+	Toggle.TextColor3=Color3.new(1,1,1)
+	Toggle.TextSize=12
+	Toggle.Font=Enum.Font.GothamBold
+	Toggle.ZIndex=50
+	Toggle.Parent=Gui
+
+	local ToggleCorner=Instance.new("UICorner")
+	ToggleCorner.CornerRadius=UDim.new(0,10)
+	ToggleCorner.Parent=Toggle
+
+	Toggle.Activated:Connect(function()
+		Window.Visible=not Window.Visible
+
+		if Window.Visible then
+			local Cam=workspace.CurrentCamera
+			local Vp=Cam and Cam.ViewportSize or Vector2.new(800,600)
+			local P=Window.AbsolutePosition
+			local S=Window.AbsoluteSize
+			if P.X<-S.X+40 or P.X>Vp.X-40 or P.Y<-10 or P.Y>Vp.Y-40 then
+				Window.Position=UDim2.new(0,10,0.5,0)
+			end
+		end
+	end)
+end
+
+local function MakeButton(Text)
+
+	local Button=
+		Instance.new("TextButton")
+
+	Button.Size=
+		UDim2.new(
+			1,
+			0,
+			0,
+			36
+		)
+
+	Button.BackgroundColor3=
+		Color3.fromRGB(
+			48,
+			48,
+			58
+		)
+
+	Button.BorderSizePixel=0
+	Button.Text=Text
+
+	Button.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+	Button.TextSize=11
+	Button.Font=
+		Enum.Font.GothamBold
+
+	Button.AutoButtonColor=true
+	Button.Active=true
+	Button.Parent=Content
+
+	local Corner=
+		Instance.new("UICorner")
+
+	Corner.CornerRadius=
+		UDim.new(
+			0,
+			8
+		)
+
+	Corner.Parent=Button
+
+	return Button
+
+end
+
+local BlockIDButton=
+	MakeButton(
+		"BLOCK ID : "..BLOCK_ID
+	)
+
+local BrightnessButton=
+	MakeButton(
+		"BRIGHTNESS : +"
+		..CUSTOM_BRIGHTNESS
+	)
+
+local FpsButton=
+	MakeButton(
+		"FPS : AUTO"
+	)
+
+local SizeButton=
+	MakeButton(
+		"SIZE : 51 × 39"
+	)
+
+local BuildButton=
+	MakeButton(
+		"CREATE GRID 51 × 39"
+	)
+
+local ColorButton=
+	MakeButton(
+		"COLOR : ON"
+	)
+
+local PlayBadAppleButton=
+	MakeButton(
+		"PLAY BAD APPLE"
+	)
+
+local PlayRGBButton=
+	MakeButton(
+		"RENDER RGB IMAGE"
+	)
+
+local PlayCustomBAButton=
+	MakeButton(
+		"PLAY CUSTOM BA"
+	)
+
+local RGBURLButton=
+	MakeButton(
+		"RGB DATA URL"
+	)
+
+local BAURLButton=
+	MakeButton(
+		"CUSTOM BA URL"
+	)
+
+local SetPosButton=
+	MakeButton(
+		"SET BUILD POSITION"
+	)
+
+local ScanButton=
+	MakeButton(
+		"SCAN BLOCK"
+	)
+
+local DeleteButton=
+	MakeButton(
+		"DELETE ALL BLOCKS"
+	)
+
+local StopButton=
+	MakeButton(
+		"STOP"
+	)
+
+-- Hide the old video-player controls; the image-builder workflow uses RGB data only.
+PlayBadAppleButton.Parent=nil
+PlayCustomBAButton.Parent=nil
+BAURLButton.Parent=nil
+
+-- Consistent modern palette for the new Pixel Builder interface.
+Window.BackgroundColor3=Color3.fromRGB(17,23,34)
+for _,Control in ipairs(Content:GetChildren()) do
+	if Control:IsA("TextButton") then
+		Control.BackgroundColor3=Color3.fromRGB(37,51,70)
+		Control.TextColor3=Color3.fromRGB(238,244,255)
+		Control.TextSize=12
+	end
+end
+Status.Text="READY • USE RGB PIXEL DATA, NOT PNG/JPG"
+
+
+local IDWindow,IDBox,IDConfirm
+do
+IDWindow=
+	Instance.new("Frame")
+
+IDWindow.Size=
+	UDim2.new(
+		0.84,
+		0,
+		0,
+		155
+	)
+
+IDWindow.Position=
+	UDim2.new(
+		0.5,
+		0,
+		0.5,
+		0
+	)
+
+IDWindow.AnchorPoint=
+	Vector2.new(
+		0.5,
+		0.5
+	)
+
+IDWindow.BackgroundColor3=
+	Color3.fromRGB(
+		20,
+		20,
+		26
+	)
+
+IDWindow.BorderSizePixel=0
+IDWindow.Visible=false
+IDWindow.ZIndex=20
+IDWindow.Parent=Gui
+
+local IDConstraint=
+	Instance.new("UISizeConstraint")
+
+IDConstraint.MinSize=
+	Vector2.new(
+		260,
+		145
+	)
+
+IDConstraint.MaxSize=
+	Vector2.new(
+		500,
+		180
+	)
+
+IDConstraint.Parent=IDWindow
+
+local IDCorner=
+	Instance.new("UICorner")
+
+IDCorner.CornerRadius=
+	UDim.new(
+		0,
+		12
+	)
+
+IDCorner.Parent=IDWindow
+
+local IDTitle=
+	Instance.new("TextLabel")
+
+IDTitle.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		28
+	)
+
+IDTitle.Position=
+	UDim2.fromOffset(
+		10,
+		8
+	)
+
+IDTitle.BackgroundTransparency=1
+IDTitle.Text="BLOCK ID"
+
+IDTitle.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+IDTitle.TextSize=13
+IDTitle.Font=
+	Enum.Font.GothamBold
+
+IDTitle.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+IDTitle.ZIndex=21
+IDTitle.Parent=IDWindow
+
+IDBox=
+	Instance.new("TextBox")
+
+IDBox.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		36
+	)
+
+IDBox.Position=
+	UDim2.fromOffset(
+		10,
+		40
+	)
+
+IDBox.BackgroundColor3=
+	Color3.fromRGB(
+		40,
+		40,
+		50
+	)
+
+IDBox.BorderSizePixel=0
+IDBox.Text=BLOCK_ID
+
+IDBox.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+IDBox.TextSize=11
+IDBox.Font=
+	Enum.Font.Code
+
+IDBox.ClearTextOnFocus=false
+IDBox.ZIndex=21
+IDBox.Parent=IDWindow
+
+local IDBoxCorner=
+	Instance.new("UICorner")
+
+IDBoxCorner.CornerRadius=
+	UDim.new(
+		0,
+		7
+	)
+
+IDBoxCorner.Parent=IDBox
+
+IDConfirm=
+	Instance.new("TextButton")
+
+IDConfirm.Size=
+	UDim2.fromOffset(
+		125,
+		32
+	)
+
+IDConfirm.Position=
+	UDim2.new(
+		0.5,
+		-62,
+		1,
+		-40
+	)
+
+IDConfirm.BackgroundColor3=
+	Color3.fromRGB(
+		65,
+		65,
+		80
+	)
+
+IDConfirm.BorderSizePixel=0
+IDConfirm.Text="CONFIRM"
+
+IDConfirm.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+IDConfirm.TextSize=11
+IDConfirm.Font=
+	Enum.Font.GothamBold
+
+IDConfirm.ZIndex=21
+IDConfirm.Parent=IDWindow
+
+local IDConfirmCorner=
+	Instance.new("UICorner")
+
+IDConfirmCorner.CornerRadius=
+	UDim.new(
+		0,
+		8
+	)
+
+IDConfirmCorner.Parent=IDConfirm
+end
+
+local BrightnessWindow,BrightnessBox,BrightnessConfirm
+do
+BrightnessWindow=
+	Instance.new("Frame")
+
+BrightnessWindow.Size=
+	UDim2.new(
+		0.90,
+		0,
+		0,
+		190
+	)
+
+BrightnessWindow.Position=
+	UDim2.new(
+		0.5,
+		0,
+		0.5,
+		0
+	)
+
+BrightnessWindow.AnchorPoint=
+	Vector2.new(
+		0.5,
+		0.5
+	)
+
+BrightnessWindow.BackgroundColor3=
+	Color3.fromRGB(
+		20,
+		20,
+		26
+	)
+
+BrightnessWindow.BorderSizePixel=0
+BrightnessWindow.Visible=false
+BrightnessWindow.ZIndex=20
+BrightnessWindow.Parent=Gui
+
+local BrightnessConstraint=
+	Instance.new("UISizeConstraint")
+
+BrightnessConstraint.MinSize=
+	Vector2.new(
+		280,
+		175
+	)
+
+BrightnessConstraint.MaxSize=
+	Vector2.new(
+		500,
+		205
+	)
+
+BrightnessConstraint.Parent=
+	BrightnessWindow
+
+local BrightnessCorner=
+	Instance.new("UICorner")
+
+BrightnessCorner.CornerRadius=
+	UDim.new(
+		0,
+		12
+	)
+
+BrightnessCorner.Parent=
+	BrightnessWindow
+
+local BrightnessTitle=
+	Instance.new("TextLabel")
+
+BrightnessTitle.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		28
+	)
+
+BrightnessTitle.Position=
+	UDim2.fromOffset(
+		10,
+		8
+	)
+
+BrightnessTitle.BackgroundTransparency=1
+BrightnessTitle.Text="ADD CUSTOM BRIGHTNESS"
+
+BrightnessTitle.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BrightnessTitle.TextSize=13
+BrightnessTitle.Font=
+	Enum.Font.GothamBold
+
+BrightnessTitle.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+BrightnessTitle.ZIndex=21
+BrightnessTitle.Parent=
+	BrightnessWindow
+
+local BrightnessExample=
+	Instance.new("TextLabel")
+
+BrightnessExample.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		20
+	)
+
+BrightnessExample.Position=
+	UDim2.fromOffset(
+		10,
+		33
+	)
+
+BrightnessExample.BackgroundTransparency=1
+BrightnessExample.Text="Example : 20 = +20"
+
+BrightnessExample.TextColor3=
+	Color3.fromRGB(
+		175,
+		175,
+		185
+	)
+
+BrightnessExample.TextSize=10
+BrightnessExample.Font=
+	Enum.Font.Code
+
+BrightnessExample.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+BrightnessExample.ZIndex=21
+BrightnessExample.Parent=
+	BrightnessWindow
+
+BrightnessBox=
+	Instance.new("TextBox")
+
+BrightnessBox.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		105
+	)
+
+BrightnessBox.Position=
+	UDim2.fromOffset(
+		10,
+		58
+	)
+
+BrightnessBox.BackgroundColor3=
+	Color3.fromRGB(
+		40,
+		40,
+		50
+	)
+
+BrightnessBox.BorderSizePixel=0
+BrightnessBox.Text=
+	tostring(
+		CUSTOM_BRIGHTNESS
+	)
+
+BrightnessBox.PlaceholderText=
+	"Enter brightness"
+
+BrightnessBox.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BrightnessBox.PlaceholderColor3=
+	Color3.fromRGB(
+		125,
+		125,
+		135
+	)
+
+BrightnessBox.TextSize=11
+BrightnessBox.Font=
+	Enum.Font.Code
+
+BrightnessBox.ClearTextOnFocus=false
+
+BrightnessBox.ZIndex=21
+BrightnessBox.Parent=
+	BrightnessWindow
+
+local BrightnessBoxCorner=
+	Instance.new("UICorner")
+
+BrightnessBoxCorner.CornerRadius=
+	UDim.new(
+		0,
+		7
+	)
+
+BrightnessBoxCorner.Parent=
+	BrightnessBox
+
+BrightnessConfirm=
+	Instance.new("TextButton")
+
+BrightnessConfirm.Size=
+	UDim2.fromOffset(
+		125,
+		32
+	)
+
+BrightnessConfirm.Position=
+	UDim2.new(
+		0.5,
+		-62,
+		1,
+		-40
+	)
+
+BrightnessConfirm.BackgroundColor3=
+	Color3.fromRGB(
+		65,
+		65,
+		80
+	)
+
+BrightnessConfirm.BorderSizePixel=0
+BrightnessConfirm.Text="CONFIRM"
+
+BrightnessConfirm.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BrightnessConfirm.TextSize=11
+BrightnessConfirm.Font=
+	Enum.Font.GothamBold
+
+BrightnessConfirm.ZIndex=21
+BrightnessConfirm.Parent=
+	BrightnessWindow
+
+local BrightnessConfirmCorner=
+	Instance.new("UICorner")
+
+BrightnessConfirmCorner.CornerRadius=
+	UDim.new(
+		0,
+		8
+	)
+
+BrightnessConfirmCorner.Parent=
+	BrightnessConfirm
+end
+
+local URLWindow,URLBox,ConfirmButton
+do
+URLWindow=
+	Instance.new("Frame")
+
+URLWindow.Size=
+	UDim2.new(
+		0.90,
+		0,
+		0,
+		205
+	)
+
+URLWindow.Position=
+	UDim2.new(
+		0.5,
+		0,
+		0.5,
+		0
+	)
+
+URLWindow.AnchorPoint=
+	Vector2.new(
+		0.5,
+		0.5
+	)
+
+URLWindow.BackgroundColor3=
+	Color3.fromRGB(
+		20,
+		20,
+		26
+	)
+
+URLWindow.BorderSizePixel=0
+URLWindow.Visible=false
+URLWindow.ZIndex=20
+URLWindow.Parent=Gui
+
+local URLConstraint=
+	Instance.new("UISizeConstraint")
+
+URLConstraint.MinSize=
+	Vector2.new(
+		280,
+		190
+	)
+
+URLConstraint.MaxSize=
+	Vector2.new(
+		500,
+		225
+	)
+
+URLConstraint.Parent=
+	URLWindow
+
+local URLCorner=
+	Instance.new("UICorner")
+
+URLCorner.CornerRadius=
+	UDim.new(
+		0,
+		12
+	)
+
+URLCorner.Parent=
+	URLWindow
+
+local URLTitle=
+	Instance.new("TextLabel")
+
+URLTitle.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		28
+	)
+
+URLTitle.Position=
+	UDim2.fromOffset(
+		10,
+		8
+	)
+
+URLTitle.BackgroundTransparency=1
+URLTitle.Text="PASTE RGB DATA OR URL"
+
+URLTitle.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+URLTitle.TextSize=13
+URLTitle.Font=
+	Enum.Font.GothamBold
+
+URLTitle.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+URLTitle.ZIndex=21
+URLTitle.Parent=
+	URLWindow
+
+URLBox=
+	Instance.new("TextBox")
+
+URLBox.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		38
+	)
+
+URLBox.Position=
+	UDim2.fromOffset(
+		10,
+		43
+	)
+
+URLBox.BackgroundColor3=
+	Color3.fromRGB(
+		40,
+		40,
+		50
+	)
+
+URLBox.BorderSizePixel=0
+URLBox.Text=RGB_URL
+
+URLBox.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+URLBox.TextSize=10
+URLBox.Font=
+	Enum.Font.Code
+
+URLBox.ClearTextOnFocus=false
+URLBox.PlaceholderText="Paste comma-separated RGB numbers or a text URL"
+URLBox.MultiLine=true
+URLBox.TextWrapped=true
+URLBox.TextYAlignment=Enum.TextYAlignment.Top
+URLBox.ZIndex=21
+URLBox.Parent=
+	URLWindow
+
+local URLBoxCorner=
+	Instance.new("UICorner")
+
+URLBoxCorner.CornerRadius=
+	UDim.new(
+		0,
+		7
+	)
+
+URLBoxCorner.Parent=
+	URLBox
+
+ConfirmButton=
+	Instance.new("TextButton")
+
+ConfirmButton.Size=
+	UDim2.fromOffset(
+		125,
+		32
+	)
+
+ConfirmButton.Position=
+	UDim2.new(
+		0.5,
+		-62,
+		1,
+		-40
+	)
+
+ConfirmButton.BackgroundColor3=
+	Color3.fromRGB(
+		65,
+		65,
+		80
+	)
+
+ConfirmButton.BorderSizePixel=0
+ConfirmButton.Text="CONFIRM"
+
+ConfirmButton.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+ConfirmButton.TextSize=11
+ConfirmButton.Font=
+	Enum.Font.GothamBold
+
+ConfirmButton.ZIndex=21
+ConfirmButton.Parent=
+	URLWindow
+
+local ConfirmCorner=
+	Instance.new("UICorner")
+
+ConfirmCorner.CornerRadius=
+	UDim.new(
+		0,
+		8
+	)
+
+ConfirmCorner.Parent=
+	ConfirmButton
+end
+
+local BAURLWindow,BAURLBox,BAConfirmButton
+do
+BAURLWindow=
+	Instance.new("Frame")
+
+BAURLWindow.Size=
+	UDim2.new(
+		0.90,
+		0,
+		0,
+		165
+	)
+
+BAURLWindow.Position=
+	UDim2.new(
+		0.5,
+		0,
+		0.5,
+		0
+	)
+
+BAURLWindow.AnchorPoint=
+	Vector2.new(
+		0.5,
+		0.5
+	)
+
+BAURLWindow.BackgroundColor3=
+	Color3.fromRGB(
+		20,
+		20,
+		26
+	)
+
+BAURLWindow.BorderSizePixel=0
+BAURLWindow.Visible=false
+BAURLWindow.ZIndex=20
+BAURLWindow.Parent=Gui
+
+local BAURLConstraint=
+	Instance.new("UISizeConstraint")
+
+BAURLConstraint.MinSize=
+	Vector2.new(
+		280,
+		150
+	)
+
+BAURLConstraint.MaxSize=
+	Vector2.new(
+		500,
+		185
+	)
+
+BAURLConstraint.Parent=
+	BAURLWindow
+
+local BAURLCorner=
+	Instance.new("UICorner")
+
+BAURLCorner.CornerRadius=
+	UDim.new(
+		0,
+		12
+	)
+
+BAURLCorner.Parent=
+	BAURLWindow
+
+local BAURLTitle=
+	Instance.new("TextLabel")
+
+BAURLTitle.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		28
+	)
+
+BAURLTitle.Position=
+	UDim2.fromOffset(
+		10,
+		8
+	)
+
+BAURLTitle.BackgroundTransparency=1
+BAURLTitle.Text="CUSTOM BA URL"
+
+BAURLTitle.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BAURLTitle.TextSize=13
+BAURLTitle.Font=
+	Enum.Font.GothamBold
+
+BAURLTitle.TextXAlignment=
+	Enum.TextXAlignment.Left
+
+BAURLTitle.ZIndex=21
+BAURLTitle.Parent=
+	BAURLWindow
+
+BAURLBox=
+	Instance.new("TextBox")
+
+BAURLBox.Size=
+	UDim2.new(
+		1,
+		-20,
+		0,
+		38
+	)
+
+BAURLBox.Position=
+	UDim2.fromOffset(
+		10,
+		43
+	)
+
+BAURLBox.BackgroundColor3=
+	Color3.fromRGB(
+		40,
+		40,
+		50
+	)
+
+BAURLBox.BorderSizePixel=0
+BAURLBox.Text=CUSTOM_BA_URL
+
+BAURLBox.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BAURLBox.TextSize=10
+BAURLBox.Font=
+	Enum.Font.Code
+
+BAURLBox.ClearTextOnFocus=false
+BAURLBox.ZIndex=21
+BAURLBox.Parent=
+	BAURLWindow
+
+local BAURLBoxCorner=
+	Instance.new("UICorner")
+
+BAURLBoxCorner.CornerRadius=
+	UDim.new(
+		0,
+		7
+	)
+
+BAURLBoxCorner.Parent=
+	BAURLBox
+
+BAConfirmButton=
+	Instance.new("TextButton")
+
+BAConfirmButton.Size=
+	UDim2.fromOffset(
+		125,
+		32
+	)
+
+BAConfirmButton.Position=
+	UDim2.new(
+		0.5,
+		-62,
+		1,
+		-40
+	)
+
+BAConfirmButton.BackgroundColor3=
+	Color3.fromRGB(
+		65,
+		65,
+		80
+	)
+
+BAConfirmButton.BorderSizePixel=0
+BAConfirmButton.Text="CONFIRM"
+
+BAConfirmButton.TextColor3=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+BAConfirmButton.TextSize=11
+BAConfirmButton.Font=
+	Enum.Font.GothamBold
+
+BAConfirmButton.ZIndex=21
+BAConfirmButton.Parent=
+	BAURLWindow
+
+local BAConfirmCorner=
+	Instance.new("UICorner")
+
+BAConfirmCorner.CornerRadius=
+	UDim.new(
+		0,
+		8
+	)
+
+BAConfirmCorner.Parent=
+	BAConfirmButton
+end
+
+-- ========== SET POS Confirm Window ==========
+local PosWindow,PosCoordLabel,PosHint,PosConfirmBtn,PosCancelBtn
+do
+PosWindow=
+	Instance.new("Frame")
+
+PosWindow.Size=
+	UDim2.new(0.92,0,0,200)
+
+PosWindow.Position=
+	UDim2.new(0.5,0,0.5,0)
+
+PosWindow.AnchorPoint=
+	Vector2.new(0.5,0.5)
+
+PosWindow.BackgroundColor3=
+	Color3.fromRGB(20,20,26)
+
+PosWindow.BorderSizePixel=0
+PosWindow.Visible=false
+PosWindow.ZIndex=25
+PosWindow.Active=true
+PosWindow.Parent=Gui
+
+local PosConstraint=
+	Instance.new("UISizeConstraint")
+
+PosConstraint.MinSize=
+	Vector2.new(280,180)
+
+PosConstraint.MaxSize=
+	Vector2.new(520,220)
+
+PosConstraint.Parent=PosWindow
+
+local PosCorner=
+	Instance.new("UICorner")
+
+PosCorner.CornerRadius=
+	UDim.new(0,12)
+
+PosCorner.Parent=PosWindow
+
+local PosTitle=
+	Instance.new("TextLabel")
+
+PosTitle.Size=
+	UDim2.new(1,-20,0,28)
+
+PosTitle.Position=
+	UDim2.fromOffset(10,8)
+
+PosTitle.BackgroundTransparency=1
+PosTitle.Text="SET BUILD ORIGIN"
+
+PosTitle.TextColor3=
+	Color3.new(1,1,1)
+
+PosTitle.TextSize=13
+PosTitle.Font=Enum.Font.GothamBold
+PosTitle.TextXAlignment=Enum.TextXAlignment.Left
+PosTitle.ZIndex=26
+PosTitle.Parent=PosWindow
+
+PosCoordLabel=
+	Instance.new("TextLabel")
+
+PosCoordLabel.Size=
+	UDim2.new(1,-20,0,36)
+
+PosCoordLabel.Position=
+	UDim2.fromOffset(10,40)
+
+PosCoordLabel.BackgroundTransparency=1
+PosCoordLabel.Text="X: 0  Y: 0  Z: 0"
+
+PosCoordLabel.TextColor3=
+	Color3.fromRGB(180,220,180)
+
+PosCoordLabel.TextSize=14
+PosCoordLabel.Font=Enum.Font.Code
+PosCoordLabel.TextXAlignment=Enum.TextXAlignment.Left
+PosCoordLabel.ZIndex=26
+PosCoordLabel.Parent=PosWindow
+
+PosHint=
+	Instance.new("TextLabel")
+
+PosHint.Size=
+	UDim2.new(1,-20,0,20)
+
+PosHint.Position=
+	UDim2.fromOffset(10,78)
+
+PosHint.BackgroundTransparency=1
+PosHint.Text="Bottom-left corner of 51×39 grid"
+
+PosHint.TextColor3=
+	Color3.fromRGB(150,150,160)
+
+PosHint.TextSize=10
+PosHint.Font=Enum.Font.Code
+PosHint.TextXAlignment=Enum.TextXAlignment.Left
+PosHint.ZIndex=26
+PosHint.Parent=PosWindow
+
+PosConfirmBtn=
+	Instance.new("TextButton")
+
+PosConfirmBtn.Size=
+	UDim2.fromOffset(130,44)
+
+PosConfirmBtn.Position=
+	UDim2.new(0.5,8,1,-54)
+
+PosConfirmBtn.BackgroundColor3=
+	Color3.fromRGB(50,120,60)
+
+PosConfirmBtn.BorderSizePixel=0
+PosConfirmBtn.Text="CONFIRM"
+PosConfirmBtn.AutoButtonColor=true
+PosConfirmBtn.Active=true
+
+PosConfirmBtn.TextColor3=
+	Color3.new(1,1,1)
+
+PosConfirmBtn.TextSize=13
+PosConfirmBtn.Font=Enum.Font.GothamBold
+PosConfirmBtn.ZIndex=26
+PosConfirmBtn.Parent=PosWindow
+
+local PosConfirmCorner=
+	Instance.new("UICorner")
+
+PosConfirmCorner.CornerRadius=
+	UDim.new(0,8)
+
+PosConfirmCorner.Parent=PosConfirmBtn
+
+PosCancelBtn=
+	Instance.new("TextButton")
+
+PosCancelBtn.Size=
+	UDim2.fromOffset(130,44)
+
+PosCancelBtn.Position=
+	UDim2.new(0.5,-138,1,-54)
+
+PosCancelBtn.BackgroundColor3=
+	Color3.fromRGB(80,50,50)
+
+PosCancelBtn.BorderSizePixel=0
+PosCancelBtn.Text="CANCEL"
+PosCancelBtn.AutoButtonColor=true
+PosCancelBtn.Active=true
+
+PosCancelBtn.TextColor3=
+	Color3.new(1,1,1)
+
+PosCancelBtn.TextSize=13
+PosCancelBtn.Font=Enum.Font.GothamBold
+PosCancelBtn.ZIndex=26
+PosCancelBtn.Parent=PosWindow
+
+local PosCancelCorner=
+	Instance.new("UICorner")
+
+PosCancelCorner.CornerRadius=
+	UDim.new(0,8)
+
+PosCancelCorner.Parent=PosCancelBtn
+end
+-- ============================================
+
+do
+local Dragging=false
+local DragStart=nil
+local WindowStart=nil
+local DragInput=nil
+
+DragButton.InputBegan:Connect(function(Input)
+
+	if
+		Input.UserInputType==
+		Enum.UserInputType.Touch
+		or
+		Input.UserInputType==
+		Enum.UserInputType.MouseButton1
+	then
+
+		Dragging=true
+		DragStart=Input.Position
+		WindowStart=Window.Position
+
+	end
+
+end)
+
+DragButton.InputEnded:Connect(function(Input)
+
+	if
+		Input.UserInputType==
+		Enum.UserInputType.Touch
+		or
+		Input.UserInputType==
+		Enum.UserInputType.MouseButton1
+	then
+
+		Dragging=false
+
+	end
+
+end)
+
+DragButton.InputChanged:Connect(function(Input)
+
+	if
+		Input.UserInputType==
+		Enum.UserInputType.Touch
+		or
+		Input.UserInputType==
+		Enum.UserInputType.MouseMovement
+	then
+
+		DragInput=Input
+
+	end
+
+end)
+
+UserInputService.InputChanged:Connect(function(Input)
+
+	if
+		not Dragging
+		or
+		Input~=DragInput
+	then
+
+		return
+
+	end
+
+	local Delta=
+		Input.Position-
+		DragStart
+
+	Window.Position=
+		UDim2.new(
+			WindowStart.X.Scale,
+			WindowStart.X.Offset+
+				Delta.X,
+			WindowStart.Y.Scale,
+			WindowStart.Y.Offset+
+				Delta.Y
+		)
+
+end)
+
+UserInputService.InputEnded:Connect(function(Input)
+	if Input.UserInputType==Enum.UserInputType.Touch
+	or Input.UserInputType==Enum.UserInputType.MouseButton1
+	then
+		Dragging=false
+	end
+end)
+end
+
+local function MathRound(Value)
+
+	return math.floor(
+		Value+0.5
+	)
+
+end
+
+-- Jangan cache PosOrigin sekali di load — bisa stale.
+local function GetOriginPosition()
+	return PosOriginPart.Position
+end
+
+local function PosMonde2Grille(
+	WorldPosition
+)
+
+	local OriginPosition=GetOriginPosition()
+
+	local X=
+		MathRound(
+			(
+				WorldPosition.X-
+				OriginPosition.X
+			)/
+			GRANDEUR_BLOC
+		)
+
+	local Y=
+		MathRound(
+			(
+				WorldPosition.Y-
+				OriginPosition.Y
+			)/
+			GRANDEUR_BLOC
+		)
+
+	local Z=
+		MathRound(
+			(
+				WorldPosition.Z-
+				OriginPosition.Z
+			)/
+			GRANDEUR_BLOC
+		)
+
+	return Vector3.new(
+		X,
+		Y,
+		Z
+	)
+
+end
+
+local function GridToWorld(X,Y,Z)
+
+	local OriginPosition=GetOriginPosition()
+
+	return
+		OriginPosition+
+		Vector3.new(
+			X*GRANDEUR_BLOC,
+			Y*GRANDEUR_BLOC,
+			Z*GRANDEUR_BLOC
+		)
+
+end
+
+-- ========== SET POS system (raycast — PC + touch) ==========
+local ExitSetPosMode,EnterSetPosMode
+do
+local function IsPointOverUI(X,Y)
+	local Host=Gui.Parent
+
+	if Host and Host:IsA("BasePlayerGui") then
+		local OK,List=pcall(function()
+			return Host:GetGuiObjectsAtPosition(X,Y)
+		end)
+		if OK and List then
+			for _,G in ipairs(List) do
+				if G:IsDescendantOf(Gui) then
+					return true
+				end
+			end
+			return false
+		end
+	end
+
+	for _,Obj in ipairs(Gui:GetChildren()) do
+		if Obj:IsA("GuiObject") and Obj.Visible then
+			local P=Obj.AbsolutePosition
+			local S=Obj.AbsoluteSize
+			if X>=P.X and X<=P.X+S.X and Y>=P.Y and Y<=P.Y+S.Y then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+local Camera=workspace.CurrentCamera
+local Mouse=Player:GetMouse()
+
+local PosPreview=
+	Instance.new("Part")
+
+PosPreview.Name="SetPosPreview"
+PosPreview.Size=
+	Vector3.new(
+		GRANDEUR_BLOC*0.98,
+		GRANDEUR_BLOC*0.98,
+		GRANDEUR_BLOC*0.98
+	)
+PosPreview.Anchored=true
+PosPreview.CanCollide=false
+PosPreview.CanQuery=false
+PosPreview.CanTouch=false
+PosPreview.Material=Enum.Material.Neon
+PosPreview.Color=
+	Color3.fromRGB(40,220,80)
+PosPreview.Transparency=0.4
+PosPreview.CastShadow=false
+PosPreview.Parent=nil
+
+local PosSelectionBox=
+	Instance.new("SelectionBox")
+
+PosSelectionBox.Adornee=PosPreview
+PosSelectionBox.Color3=
+	Color3.fromRGB(40,255,100)
+PosSelectionBox.LineThickness=0.06
+PosSelectionBox.Transparency=0.15
+PosSelectionBox.Parent=PosPreview
+
+local LastPointerScreen=nil
+local LastPointerGrid=nil
+local LastSetPosClick=0
+local SetPosTouchId=nil
+
+local RayParams=RaycastParams.new()
+RayParams.FilterType=Enum.RaycastFilterType.Exclude
+RayParams.IgnoreWater=true
+
+local function RefreshRayFilter()
+	local Filter={PosPreview,Gui}
+	local Char=Player.Character
+	if Char then
+		table.insert(Filter,Char)
+	end
+	RayParams.FilterDescendantsInstances=Filter
+end
+
+local function ScreenToWorldHit(ScreenX,ScreenY)
+	local Cam=workspace.CurrentCamera
+	if not Cam then
+		return nil,nil
+	end
+
+	RefreshRayFilter()
+
+	local Ray=Cam:ViewportPointToRay(ScreenX,ScreenY)
+	local Result=workspace:Raycast(
+		Ray.Origin,
+		Ray.Direction*2000,
+		RayParams
+	)
+
+	if not Result then
+		-- fallback: plane di Y origin (baseplate area)
+		local Origin=GetOriginPosition()
+		local T=(Origin.Y-Ray.Origin.Y)/Ray.Direction.Y
+		if T and T>0 then
+			local P=Ray.Origin+Ray.Direction*T
+			return P,nil
+		end
+		return nil,nil
+	end
+
+	return Result.Position,Result
+end
+
+local function WorldHitToGrid(WorldPos,RayResult)
+	if not WorldPos then
+		return nil
+	end
+
+	local Pos=WorldPos
+
+	-- Klik surface atas → cell di atas permukaan
+	if RayResult and RayResult.Normal then
+		local N=RayResult.Normal
+		if N.Y>0.7 then
+			Pos=Pos+Vector3.new(0,GRANDEUR_BLOC*0.15,0)
+		elseif N.Y<-0.7 then
+			Pos=Pos-Vector3.new(0,GRANDEUR_BLOC*0.15,0)
+		end
+	end
+
+	local Grid=PosMonde2Grille(Pos)
+
+	-- Baseplate Y-1 → force Y=0
+	if Grid.Y<0 then
+		Grid=Vector3.new(Grid.X,0,Grid.Z)
+	end
+
+	local X=math.clamp(math.floor(Grid.X),0,255)
+	local Y=math.clamp(math.floor(Grid.Y),0,255)
+	local Z=math.clamp(math.floor(Grid.Z),0,255)
+
+	return Vector3.new(X,Y,Z)
+end
+
+local function GetGridFromScreen(ScreenX,ScreenY)
+	local World,Result=ScreenToWorldHit(ScreenX,ScreenY)
+	return WorldHitToGrid(World,Result)
+end
+
+local function GetGridFromPointer()
+	if LastPointerScreen then
+		return GetGridFromScreen(
+			LastPointerScreen.X,
+			LastPointerScreen.Y
+		)
+	end
+
+	-- Fallback mouse (PC)
+	local Loc=UserInputService:GetMouseLocation()
+	return GetGridFromScreen(Loc.X,Loc.Y)
+end
+
+function ExitSetPosMode()
+	SettingPos=false
+	SetPosTouchId=nil
+	LastPointerScreen=nil
+	LastPointerGrid=nil
+	PosPreview.Parent=nil
+	PosWindow.Visible=false
+	SetPosButton.Text="SET POS"
+
+	if not Building
+		and not Playing
+		and not Scanning
+		and not Deleting
+	then
+		Status.Text=string.format(
+			"ORIGIN %d %d %d",
+			START_X,START_Y,START_Z
+		)
+	end
+end
+
+local function UpdatePosPreviewFromGrid(Grid)
+	if not SettingPos or not Grid then
+		return
+	end
+
+	LastPointerGrid=Grid
+
+	local World=GridToWorld(Grid.X,Grid.Y,Grid.Z)
+	PosPreview.CFrame=CFrame.new(World)
+	PosPreview.Parent=workspace
+
+	if not PosWindow.Visible then
+		Status.Text=string.format(
+			"SET POS  %d  %d  %d  (tap)",
+			Grid.X,Grid.Y,Grid.Z
+		)
+	end
+end
+
+local function UpdatePosPreview()
+	if not SettingPos or PosWindow.Visible then
+		return
+	end
+	local Grid=GetGridFromPointer()
+	if not Grid then
+		PosPreview.Parent=nil
+		return
+	end
+	UpdatePosPreviewFromGrid(Grid)
+end
+
+local function OpenPosConfirm(Grid)
+	PendingStartX=Grid.X
+	PendingStartY=Grid.Y
+	PendingStartZ=Grid.Z
+
+	PosCoordLabel.Text=string.format(
+		"X: %d   Y: %d   Z: %d",
+		Grid.X,Grid.Y,Grid.Z
+	)
+
+	PosWindow.Visible=true
+	UpdatePosPreviewFromGrid(Grid)
+end
+
+function EnterSetPosMode()
+	if Building or Playing or Scanning or Deleting then
+		Status.Text="BUSY"
+		return
+	end
+
+	if SettingPos then
+		ExitSetPosMode()
+		return
+	end
+
+	SettingPos=true
+	PosWindow.Visible=false
+	SetPosTouchId=nil
+	LastPointerScreen=nil
+	SetPosButton.Text="SET POS • TAP..."
+	Status.Text="SET POS — tap a cell"
+	RefreshRayFilter()
+end
+
+local function TryConfirmSetPos(ScreenX,ScreenY)
+	if not SettingPos or PosWindow.Visible then
+		return
+	end
+
+	local Now=os.clock()
+	if Now-LastSetPosClick<0.4 then
+		return
+	end
+	LastSetPosClick=Now
+
+	if ScreenX and ScreenY then
+		LastPointerScreen=Vector2.new(ScreenX,ScreenY)
+	end
+
+	local Grid=GetGridFromPointer()
+	if not Grid then
+		Status.Text="SET POS — no hit, try again"
+		return
+	end
+
+	OpenPosConfirm(Grid)
+end
+
+-- Preview follow pointer
+game:GetService("RunService").RenderStepped:Connect(function()
+	if SettingPos and not PosWindow.Visible then
+		-- PC: track mouse continuously
+		if not UserInputService.TouchEnabled
+			or UserInputService:GetLastInputType()==Enum.UserInputType.MouseMovement
+			or UserInputService:GetLastInputType()==Enum.UserInputType.MouseButton1
+		then
+			local Loc=UserInputService:GetMouseLocation()
+			LastPointerScreen=Vector2.new(Loc.X,Loc.Y)
+		end
+		UpdatePosPreview()
+	end
+end)
+
+-- Unified input (mouse + touch) — raycast dari screen position
+UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+	if not SettingPos then
+		return
+	end
+
+	-- Jangan block kalau sentuh GUI confirm (biar tombol tetap jalan)
+	if PosWindow.Visible then
+		return
+	end
+
+	local UIT=Input.UserInputType
+
+	if UIT==Enum.UserInputType.Touch then
+		-- Abaikan GameProcessed di world-tap; filter GUI manual
+		local Pos=Input.Position
+		LastPointerScreen=Vector2.new(Pos.X,Pos.Y)
+		SetPosTouchId=Input
+
+		-- Cek apakah tap di atas window GUI utama / popup
+if IsPointOverUI(Pos.X,Pos.Y) then
+				return
+			end
+
+
+
+
+
+
+
+
+
+
+
+
+		UpdatePosPreviewFromGrid(GetGridFromScreen(Pos.X,Pos.Y))
+
+	elseif UIT==Enum.UserInputType.MouseButton1 then
+		if GameProcessed then
+			return
+		end
+		local Loc=UserInputService:GetMouseLocation()
+		LastPointerScreen=Vector2.new(Loc.X,Loc.Y)
+		TryConfirmSetPos(Loc.X,Loc.Y)
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(Input, _)
+	if not SettingPos or PosWindow.Visible then
+		return
+	end
+
+	if Input.UserInputType==Enum.UserInputType.Touch
+		and SetPosTouchId
+		and Input==SetPosTouchId
+	then
+		local Pos=Input.Position
+		LastPointerScreen=Vector2.new(Pos.X,Pos.Y)
+		UpdatePosPreviewFromGrid(GetGridFromScreen(Pos.X,Pos.Y))
+	elseif Input.UserInputType==Enum.UserInputType.MouseMovement then
+		local Loc=UserInputService:GetMouseLocation()
+		LastPointerScreen=Vector2.new(Loc.X,Loc.Y)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(Input, _)
+	if not SettingPos then
+		return
+	end
+
+	if Input.UserInputType==Enum.UserInputType.Touch
+		and SetPosTouchId
+		and Input==SetPosTouchId
+	then
+		local Pos=Input.Position
+		LastPointerScreen=Vector2.new(Pos.X,Pos.Y)
+		SetPosTouchId=nil
+
+		-- Confirm on finger up (lebih reliable di mobile)
+		if not PosWindow.Visible then
+if IsPointOverUI(Pos.X,Pos.Y) then
+					return
+				end
+
+
+
+
+
+
+
+			TryConfirmSetPos(Pos.X,Pos.Y)
+		end
+	end
+end)
+end
+-- ====================================
+
+local function Position2CodePosition(
+	Position
+)
+
+	local X=
+		math.floor(
+			tonumber(Position.X)
+			or
+			-1
+		)
+
+	local Y=
+		math.floor(
+			tonumber(Position.Y)
+			or
+			-1
+		)
+
+	local Z=
+		math.floor(
+			tonumber(Position.Z)
+			or
+			-1
+		)
+
+	if
+		X<0
+		or
+		X>=256
+		or
+		Y<0
+		or
+		Y>=256
+		or
+		Z<0
+		or
+		Z>=256
+	then
+
+		return nil
+
+	end
+
+	local Buffer=
+		BitBuffer:Create()
+
+	Buffer:WriteUnsigned(
+		8,
+		X
+	)
+
+	Buffer:WriteUnsigned(
+		8,
+		Y
+	)
+
+	Buffer:WriteUnsigned(
+		8,
+		Z
+	)
+
+	return
+		Buffer:ToBase64()
+
+end
+
+local function NewRunToken()
+
+	RunToken+=1
+	StopRequested=false
+
+	return RunToken
+
+end
+
+local function CancelRun()
+
+	RunToken+=1
+	StopRequested=true
+
+end
+
+local function IsCancelled(Token)
+
+	return
+		StopRequested
+		or
+		Token~=RunToken
+
+end
+
+local CacheBoxesFromWorkspace,BuildGrid
+do
+local function PlaceBlock(Data)
+
+	local OK,Result=
+		pcall(function()
+
+			return
+				PlacerBloc:InvokeServer(
+					BLOCK_ID,
+					Data.code,
+					nil,
+					nil,
+					Data.key,
+					"A"
+				)
+
+		end)
+
+	if not OK then
+
+		return false,
+			tostring(Result)
+
+	end
+
+	return true,Result
+
+end
+
+local function GetObjFromBox(
+	Box
+)
+
+	if not Box then
+		return nil
+	end
+
+	-- Traverse unlimited (cap 16) — hierarki Build Logic bisa
+	-- Blocs > Model > [sub] > Box; limit 4 sebelumnya terlalu sempit
+	-- di beberapa tipe block / nesting.
+	local Current=Box
+
+	for _=1,16 do
+
+		local Parent=Current.Parent
+
+		if not Parent then
+			return nil
+		end
+
+		if Parent==Blocs then
+			return Current
+		end
+
+		Current=Parent
+
+	end
+
+	return nil
+
+end
+
+-- Ambil grid cell resmi block.
+-- Prioritas: attribute "p" (server-truth) > pivot Box > Position.
+local function ResolveBlockGrid(Box,Block)
+	-- 1) Attribute "p" = "X_Y_Z" atau "X_Y_Z,X_Y_Z,..."
+	if Block then
+		local P=Block:GetAttribute("p")
+		if typeof(P)=="string" and P~="" then
+			local First=string.split(P,",")[1]
+			if First then
+				local Parts=string.split(First,"_")
+				local X=tonumber(Parts[1])
+				local Y=tonumber(Parts[2])
+				local Z=tonumber(Parts[3])
+				if X and Y and Z then
+					return Vector3.new(
+						math.floor(X),
+						math.floor(Y),
+						math.floor(Z)
+					),"attr"
+				end
+			end
+		end
+	end
+
+	-- 2) Pivot lebih stabil dari Position (PivotOffset)
+	local PivotPos
+	local OK,PV=pcall(function()
+		return Box:GetPivot().Position
+	end)
+	if OK and PV then
+		PivotPos=PV
+	else
+		PivotPos=Box.Position
+	end
+
+	local Grid=PosMonde2Grille(PivotPos)
+	return Vector3.new(
+		math.floor(Grid.X),
+		math.floor(Grid.Y),
+		math.floor(Grid.Z)
+	),"pivot"
+end
+
+-- AutoDetect=false: KUNCI ke START_X/Y/Z (sama persis area build).
+-- AutoDetect=true: hanya untuk struktur yang dipindah tool (manual).
+function CacheBoxesFromWorkspace(AutoDetect)
+
+	if AutoDetect==nil then
+		AutoDetect=false
+	end
+
+	local TotalBox=0
+	local RejectHierarchy=0
+	local RejectRange=0
+	local RejectFar=0
+	local AttrHits=0
+	local PivotHits=0
+
+	-- Index semua box valid: key -> best candidate
+	local ByKey={}
+	local ZCount={}
+
+	for _,Object in ipairs(Blocs:GetDescendants()) do
+		if Object:IsA("BasePart") and Object.Name=="Box" then
+			TotalBox+=1
+
+			local Block=GetObjFromBox(Object)
+			if not Block then
+				RejectHierarchy+=1
+			else
+				local Grid,Src=ResolveBlockGrid(Object,Block)
+				local X,Y,Z=Grid.X,Grid.Y,Grid.Z
+				local Expected=GridToWorld(X,Y,Z)
+
+				local PivotPos=Object.Position
+				pcall(function()
+					PivotPos=Object:GetPivot().Position
+				end)
+
+				local Dist=(PivotPos-Expected).Magnitude
+
+				-- Tolak yang jauh dari cell-nya sendiri (noise / bukan grid block)
+				if Dist>SCAN_RADIUS*1.25 then
+					RejectFar+=1
+				else
+					if Src=="attr" then
+						AttrHits+=1
+					else
+						PivotHits+=1
+					end
+
+					local Key=string.format("%d_%d_%d",X,Y,Z)
+					ZCount[Z]=(ZCount[Z] or 0)+1
+
+					local Prev=ByKey[Key]
+					if not Prev or Dist<Prev.dist then
+						ByKey[Key]={
+							x=X,y=Y,z=Z,
+							key=Key,
+							box=Object,
+							block=Block,
+							world=Expected,
+							dist=Dist,
+							src=Src
+						}
+					end
+				end
+			end
+		end
+	end
+
+	local CandidateCount=0
+	for _ in pairs(ByKey) do
+		CandidateCount+=1
+	end
+
+	if DEBUG_LOG then
+		Dbg("[SCAN] Total Box:",TotalBox,
+			"| hierarchy fail:",RejectHierarchy,
+			"| far:",RejectFar,
+			"| unique keys:",CandidateCount)
+		Dbg("[SCAN] Source attr:",AttrHits,"pivot:",PivotHits)
+		Dbg("[SCAN] Locked START=",START_X,START_Y,START_Z,
+			"size",X_SIZE,"x",Y_SIZE,"AutoDetect=",AutoDetect)
+		local ZParts={}
+		for Z,Count in pairs(ZCount) do
+			table.insert(ZParts,string.format("Z=%d:%d",Z,Count))
+		end
+		table.sort(ZParts)
+		Dbg("[SCAN] Z dist:",table.concat(ZParts,", "))
+	end
+
+	local UseX=START_X
+	local UseY=START_Y
+	local UseZ=START_Z
+
+	if AutoDetect then
+		-- Cari plane yang paling banyak overlap dengan window 51x39
+		-- di sekitar START (bukan min global yang geser ke samping)
+		local BestScore=-1
+		local Best={x=START_X,y=START_Y,z=START_Z}
+
+		-- Kandidat Z: prefer START_Z, lalu Z lain yang ada isinya
+		local ZList={START_Z}
+		for Z,_ in pairs(ZCount) do
+			if Z~=START_Z then
+				table.insert(ZList,Z)
+			end
+		end
+
+		for _,Z in ipairs(ZList) do
+			-- Untuk tiap possible origin X/Y di sekitar START ± range
+			-- hitung berapa cell yang terisi di window 51x39
+			-- Optimasi: kumpulkan semua key di Z ini, cari cluster
+			local Points={}
+			for Key,C in pairs(ByKey) do
+				if C.z==Z then
+					table.insert(Points,C)
+				end
+			end
+			if #Points>0 then
+				-- Score 1: window TEPAT di START (prioritas utama)
+				local ScoreFixed=0
+				for _,C in ipairs(Points) do
+					local LX=C.x-START_X
+					local LY=C.y-START_Y
+					if LX>=0 and LX<X_SIZE and LY>=0 and LY<Y_SIZE then
+						ScoreFixed+=1
+					end
+				end
+				if ScoreFixed>BestScore then
+					BestScore=ScoreFixed
+					Best={x=START_X,y=START_Y,z=Z}
+				end
+
+				-- Score 2: min-cluster hanya jika fixed jelek & masih dekat START
+				if ScoreFixed<(TOTAL_BLOCKS*0.2) then
+					local MinX,MinY=math.huge,math.huge
+					for _,C in ipairs(Points) do
+						if C.x<MinX then MinX=C.x end
+						if C.y<MinY then MinY=C.y end
+					end
+					local ScoreMin=0
+					for _,C in ipairs(Points) do
+						local LX=C.x-MinX
+						local LY=C.y-MinY
+						if LX>=0 and LX<X_SIZE and LY>=0 and LY<Y_SIZE then
+							ScoreMin+=1
+						end
+					end
+					local DistOrigin=math.abs(MinX-START_X)+math.abs(MinY-START_Y)
+					if ScoreMin>BestScore and DistOrigin<=math.max(X_SIZE,Y_SIZE) then
+						BestScore=ScoreMin
+						Best={x=MinX,y=MinY,z=Z}
+					end
+				end
+			end
+		end
+
+		UseX=Best.x
+		UseY=Best.y
+		UseZ=Best.z
+		START_X=UseX
+		START_Y=UseY
+		START_Z=UseZ
+		Dbg("[SCAN] AutoDetect chose",UseX,UseY,UseZ,"score",BestScore)
+	end
+
+	-- === FIXED FILL: iterasi cell yang SAMA dengan PrepareBuildData ===
+	table.clear(Blocks)
+	local Found=0
+
+	for Y=UseY,UseY+Y_SIZE-1 do
+		for X=UseX,UseX+X_SIZE-1 do
+			local Key=string.format("%d_%d_%d",X,Y,UseZ)
+			local C=ByKey[Key]
+			if C then
+				Found+=1
+				Blocks[Key]={
+					x=X,
+					y=Y,
+					z=UseZ,
+					key=Key,
+					code=Position2CodePosition(Vector3.new(X,Y,UseZ)),
+					world=C.world,
+					box=C.box,
+					block=C.block
+				}
+			end
+		end
+	end
+
+	-- Hitung yang di luar window (debug offside)
+	for Key,C in pairs(ByKey) do
+		if C.z==UseZ then
+			local LX=C.x-UseX
+			local LY=C.y-UseY
+			if not (LX>=0 and LX<X_SIZE and LY>=0 and LY<Y_SIZE) then
+				RejectRange+=1
+			end
+		end
+	end
+
+	Dbg("[SCAN] In-window cached:",Found,"/",TOTAL_BLOCKS,
+		"| outside window same Z:",RejectRange)
+	Dbg("[SCAN] Origin used:",UseX,UseY,UseZ)
+
+	return Found
+
+end
+
+local function WaitForBuiltBoxes(
+	Token
+)
+
+	local Found=0
+
+	for _=1,
+		BUILD_RESCAN_ATTEMPTS
+	do
+
+		if IsCancelled(Token) then
+			return false,Found
+		end
+
+		-- Fixed origin: jangan AutoDetect saat sync build
+		Found=
+			CacheBoxesFromWorkspace(false)
+
+		Status.Text=
+			string.format(
+				"SYNC BLOCKS %d/%d",
+				Found,
+				TOTAL_BLOCKS
+			)
+
+		if
+			Found>=TOTAL_BLOCKS
+		then
+
+			return true,Found
+
+		end
+
+		task.wait(
+			BUILD_RESCAN_DELAY
+		)
+
+	end
+
+	return Found>0,Found
+
+end
+
+local function PrepareBuildData()
+
+	local Data=
+		table.create(
+			TOTAL_BLOCKS
+		)
+
+	local Index=0
+
+	for Y=START_Y,
+		START_Y+Y_SIZE-1
+	do
+
+		for X=START_X,
+			START_X+X_SIZE-1
+		do
+
+			Index+=1
+
+			local Grid=
+				Vector3.new(
+					X,
+					Y,
+					START_Z
+				)
+
+			Data[Index]=
+				{
+					x=X,
+					y=Y,
+					z=START_Z,
+
+					key=
+						string.format(
+							"%d_%d_%d",
+							X,
+							Y,
+							START_Z
+						),
+
+					code=
+						Position2CodePosition(
+							Grid
+						),
+
+					world=
+						GridToWorld(
+							X,
+							Y,
+							START_Z
+						)
+				}
+
+		end
+
+	end
+
+	return Data
+
+end
+
+function BuildGrid()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+		or
+		SettingPos
+	then
+
+		Status.Text="BUSY"
+		return
+
+	end
+
+	Building=true
+
+	local Token=
+		NewRunToken()
+
+	table.clear(
+		Blocks
+	)
+
+	Status.Text=
+		"PREPARING BUILD..."
+
+	local BuildData=
+		PrepareBuildData()
+
+	local NextIndex=0
+	local Completed=0
+	local Failed=0
+	local WorkersDone=0
+
+	local function Worker()
+
+		while true do
+
+			if IsCancelled(Token) then
+				break
+			end
+
+			local Index=
+				NextIndex+1
+
+			NextIndex=Index
+
+			if
+				Index>TOTAL_BLOCKS
+			then
+
+				break
+
+			end
+
+			local Success=
+				PlaceBlock(
+					BuildData[Index]
+				)
+
+			if
+				IsCancelled(Token)
+			then
+
+				break
+
+			end
+
+			if Success then
+				Completed+=1
+			else
+				Failed+=1
+			end
+
+			if
+				Completed%BUILD_BATCH==0
+			then
+
+				Status.Text=
+					string.format(
+						"BUILD %d/%d",
+						Completed,
+						TOTAL_BLOCKS
+					)
+
+				task.wait()
+
+			end
+
+		end
+
+		WorkersDone+=1
+
+	end
+
+	for _=1,
+		BUILD_WORKERS
+	do
+
+		task.spawn(
+			Worker
+		)
+
+	end
+
+	while
+		WorkersDone<BUILD_WORKERS
+	do
+
+		if IsCancelled(Token) then
+
+			Building=false
+			Status.Text="STOPPED"
+
+			return
+
+		end
+
+		Status.Text=
+			string.format(
+				"BUILD %d/%d",
+				Completed,
+				TOTAL_BLOCKS
+			)
+
+		task.wait()
+
+	end
+
+	if IsCancelled(Token) then
+
+		Building=false
+		Status.Text="STOPPED"
+
+		return
+
+	end
+
+	Status.Text=
+		string.format(
+			"PLACED %d/%d",
+			Completed,
+			TOTAL_BLOCKS
+		)
+
+	-- Tunggu replicate client sebelum sync scan
+	task.wait(0.75)
+
+	local Synced,Found=
+		WaitForBuiltBoxes(
+			Token
+		)
+
+	Building=false
+
+	if not Synced then
+
+		Status.Text=
+			string.format(
+				"BUILD DONE • %d BOX",
+				Found
+			)
+
+		return
+
+	end
+
+	Status.Text=
+		string.format(
+			"READY • %d/%d BLOCKS",
+			Found,
+			TOTAL_BLOCKS
+		)
+
+	Dbg("BUILD:",Completed,"/",TOTAL_BLOCKS,"FAILED:",Failed,"CACHED:",Found)
+
+end
+end
+
+local DeleteAllBlocks
+do
+local function DeleteOneBlock(Data)
+
+	if
+		not Data
+		or
+		not Data.block
+	then
+
+		return false,
+			"BLOCK NIL"
+
+	end
+
+	local Block=
+		Data.block
+
+	if
+		not Block.Parent
+	then
+
+		return true,
+			"ALREADY REMOVED"
+
+	end
+
+	local OriginalParent=
+		Block.Parent
+
+	local P=
+		Block:GetAttribute(
+			"p"
+		)
+
+	Block:SetAttribute(
+		"t",
+		os.clock()
+	)
+
+	Block.Parent=
+		FauxBlocsDetruits
+
+	local V1=nil
+	local V2=nil
+	local V3=nil
+	local V4=nil
+
+	local OK,Err=
+		pcall(function()
+
+			V1,V2,V3,V4=
+				DeleteBloc:InvokeServer(
+					nil,
+					nil,
+					nil,
+					Block
+				)
+
+		end)
+
+	if not OK then
+
+		if
+			Block.Parent==
+				FauxBlocsDetruits
+		then
+
+			Block.Parent=
+				OriginalParent
+
+			Block:SetAttribute(
+				"t",
+				nil
+			)
+
+		end
+
+		return false,
+			tostring(Err)
+
+	end
+
+	if
+		V1==-1
+	then
+
+		return false,
+			"SERVER -1"
+
+	end
+
+	if
+		V1==true
+	then
+
+		return true,
+			P
+
+	end
+
+	if
+		V4
+		and
+		typeof(V4)=="Instance"
+	then
+
+		pcall(function()
+
+			V4.Parent=
+				Blocs
+
+			V4:SetAttribute(
+				"t",
+				nil
+			)
+
+		end)
+
+	elseif
+		Block
+		and
+		Block.Parent==
+			FauxBlocsDetruits
+	then
+
+		Block.Parent=
+			OriginalParent
+
+		Block:SetAttribute(
+			"t",
+			nil
+		)
+
+	end
+
+	return false,
+		tostring(
+			V2
+			or
+			V3
+			or
+			"DELETE FAILED"
+		)
+
+end
+
+function DeleteAllBlocks()
+
+	if
+		Deleting
+		or
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		SettingPos
+	then
+
+		return
+
+	end
+
+	Deleting=true
+
+	local Token=
+		NewRunToken()
+
+	-- Seperti paint: pakai cache Instance yang sudah diingat.
+	-- Jangan clear + re-scan dulu, biar tetap bisa delete setelah dipindah tool.
+	local Found = 0
+	for _ in pairs(Blocks) do
+		Found += 1
+	end
+
+	if Found <= 0 then
+		Status.Text = "SCANNING BLOCKS..."
+		Found = CacheBoxesFromWorkspace(false)
+		if Found == 0 then
+			Found = CacheBoxesFromWorkspace(true)
+		end
+	else
+		Status.Text = string.format("USING CACHED %d BLOCKS", Found)
+	end
+
+	if IsCancelled(Token) then
+		Deleting = false
+		Status.Text = "STOPPED"
+		return
+	end
+
+	if Found <= 0 then
+		Deleting = false
+		Status.Text = "NO BLOCK FOUND"
+		return
+	end
+
+	local List = table.create(Found)
+	local Count = 0
+
+	for _, Data in pairs(Blocks) do
+		-- Instance masih hidup & masih di folder Blocs (meski posisinya sudah dipindah)
+		if Data and Data.block and Data.block.Parent == Blocs then
+			Count += 1
+			List[Count] = Data
+		end
+	end
+
+	if
+		Count==0
+	then
+
+		Deleting=false
+		Status.Text=
+			"NO VALID BLOCK FOUND"
+
+		return
+
+	end
+
+	local Completed=0
+	local Failed=0
+	local BatchStart=1
+
+	while
+		BatchStart<=Count
+	do
+
+		if
+			IsCancelled(Token)
+		then
+
+			Deleting=false
+			Status.Text="STOPPED"
+
+			return
+
+		end
+
+		local BatchEnd=
+			math.min(
+				BatchStart+
+				DELETE_BATCH-
+				1,
+				Count
+			)
+
+		local BatchCount=
+			BatchEnd-
+			BatchStart+
+			1
+
+		local BatchNext=0
+		local WorkersDone=0
+
+		local WorkerCount=
+			math.min(
+				DELETE_WORKERS,
+				BatchCount
+			)
+
+		local function Worker()
+
+			while true do
+
+				if
+					IsCancelled(Token)
+				then
+
+					break
+
+				end
+
+				local LocalIndex=
+					BatchNext+1
+
+				BatchNext=
+					LocalIndex
+
+				if
+					LocalIndex>BatchCount
+				then
+
+					break
+
+				end
+
+				local GlobalIndex=
+					BatchStart+
+					LocalIndex-
+					1
+
+				local Data=
+					List[GlobalIndex]
+
+				local Success,Error=
+					DeleteOneBlock(
+						Data
+					)
+
+				if
+					IsCancelled(Token)
+				then
+
+					break
+
+				end
+
+				if Success then
+
+					Completed+=1
+
+					Blocks[
+						Data.key
+					]=nil
+
+				else
+
+					Failed+=1
+
+					warn(
+						"[DELETE]",
+						Data.key,
+						Error
+					)
+
+				end
+
+			end
+
+			WorkersDone+=1
+
+		end
+
+		for _=1,
+			WorkerCount
+		do
+
+			task.spawn(
+				Worker
+			)
+
+		end
+
+		while
+			WorkersDone<WorkerCount
+		do
+
+			if
+				IsCancelled(Token)
+			then
+
+				Deleting=false
+				Status.Text="STOPPED"
+
+				return
+
+			end
+
+			Status.Text=
+				string.format(
+					"DELETE %d/%d • FAIL %d",
+					Completed,
+					Count,
+					Failed
+				)
+
+			task.wait()
+
+		end
+
+		BatchStart=
+			BatchEnd+
+			1
+
+	end
+
+	table.clear(
+		Blocks
+	)
+
+	table.clear(
+		PreviousPixels
+	)
+
+	Deleting=false
+
+	Status.Text=
+		string.format(
+			"DELETED %d/%d • FAILED %d",
+			Completed,
+			Count,
+			Failed
+		)
+
+	Dbg("DELETE:",Completed,"/",Count,"FAILED:",Failed)
+
+end
+end
+
+local function ScanBlocks()
+
+	if
+		Scanning
+		or
+		Building
+		or
+		Playing
+		or
+		Deleting
+		or
+		SettingPos
+	then
+
+		return
+
+	end
+
+	Scanning=true
+
+	local Token=
+		NewRunToken()
+
+	table.clear(
+		Blocks
+	)
+
+	Status.Text=
+		"SCANNING BLOCKS..."
+
+	-- SELALU fixed dulu = area yang SAMA dengan BUILD / SET POS
+	-- Jangan AutoDetect otomatis (itu yang bikin scan loncat ke samping)
+	local Found=
+		CacheBoxesFromWorkspace(false)
+
+	-- AutoDetect HANYA jika benar-benar 0 (mis. setelah pindah tool total)
+	if Found==0 then
+		Dbg("[SCAN] Fixed empty — last resort AutoDetect")
+		Status.Text="SCAN AUTO-DETECT..."
+		Found=CacheBoxesFromWorkspace(true)
+	elseif Found<(TOTAL_BLOCKS*0.5) then
+		Dbg("[SCAN] Partial",Found,"/",TOTAL_BLOCKS,
+			"— keep FIXED origin")
+	end
+
+	Scanning=false
+
+	if
+		IsCancelled(Token)
+	then
+
+		Status.Text=
+			"SCAN STOPPED"
+
+		return
+
+	end
+
+	Status.Text=
+		string.format(
+			"SCANNED • %d/%d BLOCKS",
+			Found,
+			TOTAL_BLOCKS
+		)
+
+	Dbg("SCAN:",Found,"/",TOTAL_BLOCKS)
+
+end
+
+local ClearMediaCaches,LoadStartup,LoadBadApple,LoadCustomBA,LoadRGB
+do
+local function LoadText(URL)
+
+local OK,Text=pcall(function()
+		return game:HttpGet(URL,true)
+	end)
+
+	if not OK or type(Text)~="string" or Text=="" then
+		-- fallback: fungsi request bawaan executor
+		local Req=nil
+		pcall(function()
+			Req=(syn and syn.request) or http_request or request or (http and http.request)
+		end)
+		if Req then
+			local OK2,Res=pcall(Req,{Url=URL,Method="GET"})
+			if OK2 and type(Res)=="table" and type(Res.Body)=="string" then
+				OK=true
+				Text=Res.Body
+			end
+		end
+	end
+
+
+
+
+
+
+
+
+
+	if
+		not OK
+		or
+		type(Text)~="string"
+		or
+		Text==""
+	then
+
+		return nil
+
+	end
+
+	Text=
+		Text:gsub(
+			"\239\187\191",
+			""
+		)
+
+	Text=Text:gsub("\r","")
+
+	-- GitHub / CDN 404 HTML — jangan dianggap frame data
+	local Head=Text:sub(1,256):lower()
+	if Head:find("<!doctype",1,true)
+		or Head:find("<html",1,true)
+		or Head:find("404: not found",1,true)
+		or Head:find("400: invalid",1,true)
+		or Head:find("429:",1,true)
+	then
+		return nil
+	end
+
+	return Text
+
+end
+
+-- Header sebelum payload:
+-- FPS=10
+-- MODE=BA
+-- WIDTH=51
+-- HEIGHT=39
+-- ---
+-- <payload>
+local function ApplyMediaHeader(Text)
+
+	MediaSrcW=nil
+	MediaSrcH=nil
+
+	if not Text or Text=="" then
+		return Text
+	end
+
+	LastParsedFps=nil
+	MediaSrcW=nil
+	MediaSrcH=nil
+
+	-- FRAME_DELAY = kecepatan ASLI konten (header, atau default 20 FPS tanpa header).
+	-- Pilihan FPS user TIDAK mengubah ini; cuma ngatur seberapa sering render (skip frame).
+	FRAME_DELAY=1/DEFAULT_FPS
+	LastParsedFps=DEFAULT_FPS
+
+	local Header=nil
+	local Body=Text
+
+	local SepStart,SepEnd=Text:find("%-%-%-")
+	if SepStart then
+		Header=Text:sub(1,SepStart-1)
+		Body=Text:sub((SepEnd or SepStart)+1)
+		Body=Body:gsub("^[\n]+","")
+	else
+		local FirstLine=Text:match("^[^\n]+")
+		if FirstLine and FirstLine:match("^%s*FPS%s*=") then
+			Header=Text:match("^(.-)\n") or Text
+			Body=Text:gsub("^[^\n]*\n?","",1)
+		end
+	end
+
+	if Header then
+		local FpsStr=Header:match("FPS%s*=%s*([%d%.]+)")
+		local Fps=tonumber(FpsStr)
+		if Fps and Fps>0 and Fps<=120 then
+			LastParsedFps=Fps
+			FRAME_DELAY=1/Fps
+			Dbg("MEDIA FPS=",Fps,"FRAME_DELAY=",FRAME_DELAY)
+		end
+
+		local Ww=tonumber(Header:match("WIDTH%s*=%s*(%d+)"))
+		local Hh=tonumber(Header:match("HEIGHT%s*=%s*(%d+)"))
+		if Ww and Hh and Ww>0 and Hh>0 and Ww<=512 and Hh<=512 then
+			MediaSrcW=Ww
+			MediaSrcH=Hh
+		end
+	end
+
+	-- Tanpa WIDTH/HEIGHT di header → anggap sumber default 51×39
+	if not MediaSrcW or not MediaSrcH then
+		MediaSrcW=DEFAULT_X_SIZE
+		MediaSrcH=DEFAULT_Y_SIZE
+	end
+
+	return Body
+
+end
+
+local function ScaleBAString(Src,Sw,Sh,Dw,Dh)
+	if not Src or Sw<=0 or Sh<=0 or Dw<=0 or Dh<=0 then
+		return nil
+	end
+	if Sw==Dw and Sh==Dh and #Src==Dw*Dh then
+		return Src
+	end
+	local Out=table.create(Dw*Dh)
+	local Idx=0
+	for Y=0,Dh-1 do
+		local Sy=math.clamp(math.floor(Y*Sh/Dh),0,Sh-1)
+		for X=0,Dw-1 do
+			local Sx=math.clamp(math.floor(X*Sw/Dw),0,Sw-1)
+			local Si=Sy*Sw+Sx+1
+			Idx+=1
+			local Ch=Src:sub(Si,Si)
+			Out[Idx]=(Ch=="A" or Ch=="B") and Ch or "B"
+		end
+	end
+	return table.concat(Out)
+end
+
+local function ScaleRGBList(Pixels,Sw,Sh,Dw,Dh)
+	if not Pixels or Sw<=0 or Sh<=0 or Dw<=0 or Dh<=0 then
+		return nil
+	end
+	if Sw==Dw and Sh==Dh then
+		return Pixels
+	end
+	local Out=table.create(Dw*Dh)
+	local Idx=0
+	local Black=Color3.new(0,0,0)
+	for Y=0,Dh-1 do
+		local Sy=math.clamp(math.floor(Y*Sh/Dh),0,Sh-1)
+		for X=0,Dw-1 do
+			local Sx=math.clamp(math.floor(X*Sw/Dw),0,Sw-1)
+			local Si=Sy*Sw+Sx+1
+			Idx+=1
+			Out[Idx]=Pixels[Si] or Black
+		end
+	end
+	return Out
+end
+
+local COMMON_DIMS={
+	{51,39},{32,24},{40,30},{48,36},{64,36},{64,48},{80,45},{96,54},{16,16},{24,24},{32,32},
+}
+
+local function InferSrcDims(Count)
+	if not Count or Count<=0 then
+		return nil,nil
+	end
+	-- prioritas: header media
+	if MediaSrcW and MediaSrcH and MediaSrcW*MediaSrcH==Count then
+		return MediaSrcW,MediaSrcH
+	end
+	-- default klasik Bad Apple 51×39
+	if Count==DEFAULT_X_SIZE*DEFAULT_Y_SIZE then
+		return DEFAULT_X_SIZE,DEFAULT_Y_SIZE
+	end
+	if Count==TOTAL_BLOCKS then
+		return X_SIZE,Y_SIZE
+	end
+	for _,D in ipairs(COMMON_DIMS) do
+		if D[1]*D[2]==Count then
+			return D[1],D[2]
+		end
+	end
+	for W=8,math.min(256,Count) do
+		if Count%W==0 then
+			local H=Count/W
+			if H>=8 and H<=256 then
+				local Aspect=W/H
+				if Aspect>=0.75 and Aspect<=2.8 then
+					return W,H
+				end
+			end
+		end
+	end
+	return nil,nil
+end
+
+local function NormalizeBAFrame(FrameStr)
+	if type(FrameStr)~="string" or #FrameStr==0 then
+		return nil
+	end
+	-- buang karakter non A/B
+	if FrameStr:find("[^ABab]") then
+		FrameStr=FrameStr:gsub("[^ABab]",""):upper()
+	else
+		FrameStr=FrameStr:upper()
+	end
+	if #FrameStr==0 then
+		return nil
+	end
+	if #FrameStr==TOTAL_BLOCKS then
+		return FrameStr
+	end
+	local Sw,Sh=InferSrcDims(#FrameStr)
+	if Sw and Sh then
+		return ScaleBAString(FrameStr,Sw,Sh,X_SIZE,Y_SIZE)
+	end
+	return nil
+end
+
+local function ParseRGBFrame(Text)
+
+	local Pixels={}
+	local Count=0
+
+	for R,G,B in
+		Text:gmatch(
+			"(%d+)%s*,%s*(%d+)%s*,%s*(%d+)"
+		)
+	do
+
+		R=tonumber(R)
+		G=tonumber(G)
+		B=tonumber(B)
+
+		if
+			R and G and B
+			and R>=0 and R<=255
+			and G>=0 and G<=255
+			and B>=0 and B<=255
+		then
+			Count+=1
+			Pixels[Count]=Color3.fromRGB(R,G,B)
+		end
+
+	end
+
+	if Count==0 then
+		return nil
+	end
+
+	if Count==TOTAL_BLOCKS then
+		return Pixels
+	end
+
+	local Sw,Sh=InferSrcDims(Count)
+	if Sw and Sh then
+		return ScaleRGBList(Pixels,Sw,Sh,X_SIZE,Y_SIZE)
+	end
+
+	return nil
+
+end
+
+local function LoadRGBFrames(
+	URL,
+	StatusText,
+	EmptyText
+)
+
+	if
+		not URL
+		or
+		URL==""
+	then
+
+		Status.Text=
+			"RGB URL EMPTY"
+
+		return nil
+
+	end
+
+	Status.Text=
+		StatusText
+
+	local Text=
+		LoadText(
+			URL
+		)
+
+	if not Text then
+
+		Status.Text=
+			"DOWNLOAD FAILED"
+
+		return nil
+
+	end
+
+	Text=ApplyMediaHeader(Text)
+
+	Text=
+		Text:gsub(
+			"%s",
+			""
+		)
+
+	local Frames={}
+
+	for _,FrameText in
+		ipairs(
+			string.split(
+				Text,
+				"N"
+			)
+		)
+	do
+
+		if
+			#FrameText>0
+		then
+
+			local Frame=
+				ParseRGBFrame(
+					FrameText
+				)
+
+			if Frame then
+
+				Frames[
+					#Frames+1
+				]=Frame
+
+			end
+
+		end
+
+	end
+
+	if
+		#Frames==0
+	then
+
+		Status.Text=
+			EmptyText
+
+		return nil
+
+	end
+
+	return Frames
+
+end
+
+function ClearMediaCaches()
+	BadAppleFrames=nil
+	CustomBAFrames=nil
+	RGBFrames=nil
+	StartupFrames=nil
+	StartupMissing=false
+	table.clear(PreviousPixels)
+end
+
+function LoadStartup()
+
+	if StartupFrames and #StartupFrames>0 then
+		StartupMissing=false
+		return true
+	end
+
+	if not STARTUP_URL or STARTUP_URL=="" then
+		StartupMissing=true
+		StartupFrames=nil
+		Status.Text="STARTUP URL EMPTY → 404"
+		return false
+	end
+
+	Status.Text="LOADING STARTUP RGB..."
+
+	local Frames=
+		LoadRGBFrames(
+			STARTUP_URL,
+			"LOADING STARTUP RGB...",
+			"STARTUP RGB EMPTY"
+		)
+
+	if not Frames or #Frames==0 then
+		StartupMissing=true
+		StartupFrames=nil
+		Status.Text="404 STARTUP NOT FOUND"
+		return false
+	end
+
+	StartupMissing=false
+	StartupFrames=Frames
+	StartupFrameDelay=FRAME_DELAY
+	return true
+
+end
+
+function LoadBadApple()
+
+	if BadAppleFrames and #BadAppleFrames>0 then
+		return true
+	end
+
+	Status.Text=
+		"LOADING BAD APPLE..."
+
+	local Text=
+		LoadText(
+			BAD_APPLE_URL
+		)
+
+	if not Text then
+
+		Status.Text=
+			"DOWNLOAD FAILED"
+
+		return false
+
+	end
+
+	Text=ApplyMediaHeader(Text)
+
+	Text=
+		Text:gsub(
+			"%s",
+			""
+		)
+
+	local Frames={}
+
+	for _,Frame in
+		ipairs(
+			string.split(
+				Text,
+				"N"
+			)
+		)
+	do
+
+		local Norm=NormalizeBAFrame(Frame)
+		if Norm then
+			Frames[#Frames+1]=Norm
+		end
+
+	end
+
+	if
+		#Frames==0
+	then
+
+		Status.Text=
+			"BAD APPLE EMPTY"
+
+		return false
+
+	end
+
+	BadAppleFrames=
+		Frames
+	MainFrameDelay=FRAME_DELAY
+
+	return true
+
+end
+
+function LoadCustomBA()
+
+	if CustomBAFrames and #CustomBAFrames>0 then
+		return true
+	end
+
+	if
+		not CUSTOM_BA_URL
+		or
+		CUSTOM_BA_URL==""
+	then
+
+		Status.Text=
+			"CUSTOM BA URL EMPTY"
+
+		return false
+
+	end
+
+	Status.Text=
+		"LOADING CUSTOM BA..."
+
+	local Text=
+		LoadText(
+			CUSTOM_BA_URL
+		)
+
+	if not Text then
+
+		Status.Text=
+			"DOWNLOAD FAILED"
+
+		return false
+
+	end
+
+	Text=ApplyMediaHeader(Text)
+
+	Text=
+		Text:gsub(
+			"%s",
+			""
+		)
+
+	local Frames={}
+
+	for _,Frame in
+		ipairs(
+			string.split(
+				Text,
+				"N"
+			)
+		)
+	do
+
+		local Norm=NormalizeBAFrame(Frame)
+		if Norm then
+			Frames[#Frames+1]=Norm
+		end
+
+	end
+
+	if
+		#Frames==0
+	then
+
+		Status.Text=
+			"CUSTOM BA EMPTY"
+
+		return false
+
+	end
+
+	CustomBAFrames=
+		Frames
+	MainFrameDelay=FRAME_DELAY
+
+	return true
+
+end
+
+function LoadRGB()
+
+	if RGBFrames and #RGBFrames>0 then
+		return true
+	end
+
+	local Frames={}
+
+	if RGB_DATA~="" then
+		Status.Text="PARSING PASTED RGB DATA..."
+		local Frame=ParseRGBFrame(RGB_DATA)
+		if Frame then
+			Frames[1]=Frame
+		else
+			Status.Text="RGB DATA SIZE INVALID"
+			return false
+		end
+	else
+		Frames=LoadRGBFrames(
+			RGB_URL,
+			"LOADING RGB...",
+			"RGB EMPTY"
+		)
+	end
+
+	if not Frames or #Frames==0 then
+		return false
+	end
+
+	RGBFrames=
+		Frames
+	MainFrameDelay=FRAME_DELAY
+
+	return true
+
+end
+end
+
+local PaintFrame,ResetPixelState,PreparePlayback
+do
+local BLACK=
+	Color3.new(
+		0,
+		0,
+		0
+	)
+
+local WHITE=
+	Color3.new(
+		1,
+		1,
+		1
+	)
+
+local function ApplyBrightness(
+	Color
+)
+
+	local R=
+		math.floor(
+			Color.R*255+
+			0.5
+		)
+
+	local G=
+		math.floor(
+			Color.G*255+
+			0.5
+		)
+
+	local B=
+		math.floor(
+			Color.B*255+
+			0.5
+		)
+
+	R=
+		math.min(
+			255,
+			R+
+			CUSTOM_BRIGHTNESS
+		)
+
+	G=
+		math.min(
+			255,
+			G+
+			CUSTOM_BRIGHTNESS
+		)
+
+	B=
+		math.min(
+			255,
+			B+
+			CUSTOM_BRIGHTNESS
+		)
+
+	R=
+		math.max(
+			0,
+			R
+		)
+
+	G=
+		math.max(
+			0,
+			G
+		)
+
+	B=
+		math.max(
+			0,
+			B
+		)
+
+	return
+		Color3.fromRGB(
+			R,
+			G,
+			B
+		)
+
+end
+
+local function PaintBox(
+	Box,
+	Color
+)
+
+	if not Box or not Box.Parent then
+		return false
+	end
+
+	local OK=pcall(function()
+		Colorie:FireServer(
+			Color,
+			"Default",
+			Box,
+			0,
+			2
+		)
+	end)
+
+	return OK
+
+end
+
+local function GetCharacter(
+	Frame,
+	X,
+	Y
+)
+
+	if type(Frame)~="string" or X<0 or Y<0 or X>=X_SIZE or Y>=Y_SIZE then
+		return nil
+	end
+
+	local FrameY=
+		Y_SIZE-
+		1-
+		Y
+
+	local Index=
+		FrameY*
+		X_SIZE+
+		X+
+		1
+
+	if Index<1 or Index>#Frame then
+		return nil
+	end
+
+	local Byte=
+		string.byte(
+			Frame,
+			Index
+		)
+
+	if
+		Byte==65
+	then
+
+		return "A"
+
+	end
+
+	if
+		Byte==66
+	then
+
+		return "B"
+
+	end
+
+	return nil
+
+end
+
+local function GetRGBColor(
+	Frame,
+	X,
+	Y
+)
+
+	if not Frame or X<0 or Y<0 or X>=X_SIZE or Y>=Y_SIZE then
+		return nil
+	end
+
+	local FrameY=
+		Y_SIZE-
+		1-
+		Y
+
+	local Index=
+		FrameY*
+		X_SIZE+
+		X+
+		1
+
+	return Frame[Index]
+
+end
+
+local function PrepareABFrame(
+	Frame,
+	FirstFrame
+)
+
+	local Workers=
+		table.create(
+			PAINT_WORKERS
+		)
+
+	local Counts=
+		table.create(
+			PAINT_WORKERS,
+			0
+		)
+
+	for Worker=1,
+		PAINT_WORKERS
+	do
+
+		Workers[Worker]={}
+
+	end
+
+	local Position=0
+
+	for Y=0,
+		Y_SIZE-1
+	do
+
+		for X=0,
+			X_SIZE-1
+		do
+
+			Position+=1
+
+			local Worker=
+				(
+					Position-
+					1
+				)%
+				PAINT_WORKERS+
+				1
+
+			local Character=
+				GetCharacter(
+					Frame,
+					X,
+					Y
+				)
+
+			if
+				Character=="A"
+				or
+				Character=="B"
+			then
+
+				local Key=
+					string.format(
+						"%d_%d_%d",
+						X+
+						START_X,
+						Y+
+						START_Y,
+						START_Z
+					)
+
+				local Data=
+					Blocks[Key]
+
+				if Data then
+
+					local Old=
+						PreviousPixels[Key]
+
+					if
+						FirstFrame
+						or
+						Old~=Character
+					then
+
+						local Count=
+							Counts[Worker]+1
+
+						Counts[Worker]=
+							Count
+
+						Workers[Worker][Count]=
+							{
+								Box=Data.box,
+
+								Color=
+									Character=="A"
+									and
+									WHITE
+									or
+									BLACK,
+
+								Key=Key,
+								Value=Character
+							}
+
+					end
+
+				end
+
+			end
+
+		end
+
+	end
+
+	return
+		Workers,
+		Counts
+
+end
+
+local function PrepareRGBFrame(
+	Frame,
+	FirstFrame,
+	UseBrightness
+)
+
+	local Workers=
+		table.create(
+			PAINT_WORKERS
+		)
+
+	local Counts=
+		table.create(
+			PAINT_WORKERS,
+			0
+		)
+
+	for Worker=1,
+		PAINT_WORKERS
+	do
+
+		Workers[Worker]={}
+
+	end
+
+	local Position=0
+
+	for Y=0,
+		Y_SIZE-1
+	do
+
+		for X=0,
+			X_SIZE-1
+		do
+
+			Position+=1
+
+			local Worker=
+				(
+					Position-
+					1
+				)%
+				PAINT_WORKERS+
+				1
+
+			local Key=
+				string.format(
+					"%d_%d_%d",
+					X+
+					START_X,
+					Y+
+					START_Y,
+					START_Z
+				)
+
+			local Data=
+				Blocks[Key]
+
+			local Color=
+				GetRGBColor(
+					Frame,
+					X,
+					Y
+				)
+
+			if
+				Data
+				and
+				Color
+			then
+
+				if
+					UseBrightness
+					and
+					CUSTOM_BRIGHTNESS~=0
+				then
+
+					Color=
+						ApplyBrightness(
+							Color
+						)
+
+				end
+
+				local Old=
+					PreviousPixels[Key]
+
+				local Changed=
+					FirstFrame
+
+				if
+					not Changed
+					and
+					Old
+				then
+
+					if
+						type(Old)=="table"
+					then
+
+						local R=
+							math.floor(
+								Color.R*
+								255+
+								0.5
+							)
+
+						local G=
+							math.floor(
+								Color.G*
+								255+
+								0.5
+							)
+
+						local B=
+							math.floor(
+								Color.B*
+								255+
+								0.5
+							)
+
+						Changed=
+							math.floor(Old.R*255+0.5)~=R
+							or
+							math.floor(Old.G*255+0.5)~=G
+							or
+							math.floor(Old.B*255+0.5)~=B
+
+					else
+
+						Changed=true
+
+					end
+
+				end
+
+				if Changed then
+
+					local Count=
+						Counts[Worker]+1
+
+					Counts[Worker]=
+						Count
+
+					Workers[Worker][Count]=
+						{
+							Box=Data.box,
+							Color=Color,
+							Key=Key,
+
+							Value=
+								{
+									R=Color.R,
+									G=Color.G,
+									B=Color.B
+								}
+						}
+
+				end
+
+			end
+
+		end
+
+	end
+
+	return
+		Workers,
+		Counts
+
+end
+
+local function CommitFrame(
+	Workers,
+	Counts
+)
+
+	for Worker=1,
+		PAINT_WORKERS
+	do
+
+		local Items=
+			Workers[Worker]
+
+		local Count=
+			Counts[Worker]
+
+		for Index=1,
+			Count
+		do
+
+			local Item=
+				Items[Index]
+
+			PreviousPixels[
+				Item.Key
+			]=
+				Item.Value
+
+		end
+
+	end
+
+end
+
+local function PaintPreparedFrame(
+	Workers,
+	Counts,
+	Token
+)
+
+	local ActiveWorkers=0
+	local FinishedWorkers=0
+
+	for Worker=1,
+		PAINT_WORKERS
+	do
+
+		local Count=
+			Counts[Worker]
+
+		if Count>0 then
+
+			ActiveWorkers+=1
+
+			task.spawn(function()
+
+				local Items=
+					Workers[Worker]
+
+				local Index=1
+
+				while
+					Index<=Count
+				do
+
+					if
+						IsCancelled(Token)
+					then
+
+						break
+
+					end
+
+					local EndIndex=
+						math.min(
+							Index+
+							PAINT_BATCH-
+							1,
+							Count
+						)
+
+					for ItemIndex=Index,
+						EndIndex
+					do
+
+						if
+							IsCancelled(Token)
+						then
+
+							break
+
+						end
+
+						local Item=
+							Items[
+								ItemIndex
+							]
+
+						PaintBox(
+							Item.Box,
+							Item.Color
+						)
+
+					end
+
+					Index=
+						EndIndex+
+						1
+
+					if
+						Index<=Count
+						and
+						not IsCancelled(Token)
+					then
+
+						task.wait()
+
+					end
+
+				end
+
+				FinishedWorkers+=1
+
+			end)
+
+		end
+
+	end
+
+	if
+		ActiveWorkers==0
+	then
+
+		return
+			not IsCancelled(Token)
+
+	end
+
+	while
+		FinishedWorkers<
+		ActiveWorkers
+	do
+
+		if
+			IsCancelled(Token)
+		then
+
+			return false
+
+		end
+
+		task.wait()
+
+	end
+
+	return
+		not IsCancelled(Token)
+
+end
+
+function PaintFrame(
+	Frame,
+	FirstFrame,
+	Token,
+	RGBMode,
+	UseBrightness
+)
+
+	if not Frame then
+		return false
+	end
+	if RGBMode then
+		if type(Frame)~="table" then
+			return false
+		end
+	else
+		if type(Frame)~="string" or #Frame==0 then
+			return false
+		end
+	end
+
+	local Workers
+	local Counts
+
+	if RGBMode then
+
+		Workers,Counts=
+			PrepareRGBFrame(
+				Frame,
+				FirstFrame,
+				UseBrightness
+			)
+
+	else
+
+		Workers,Counts=
+			PrepareABFrame(
+				Frame,
+				FirstFrame
+			)
+
+	end
+
+	local TotalChanges=0
+
+	for Worker=1,
+		PAINT_WORKERS
+	do
+
+		TotalChanges+=
+			Counts[Worker]
+
+	end
+
+	if
+		TotalChanges==0
+	then
+
+		return true
+
+	end
+
+	local OK=
+		PaintPreparedFrame(
+			Workers,
+			Counts,
+			Token
+		)
+
+	if
+		not OK
+		or
+		IsCancelled(Token)
+	then
+
+		return false
+
+	end
+
+	CommitFrame(
+		Workers,
+		Counts
+	)
+
+	return true
+
+end
+
+function ResetPixelState()
+
+	table.clear(
+		PreviousPixels
+	)
+
+end
+
+function PreparePlayback(
+	Mode
+)
+
+	-- Startup gagal (404/github down) TIDAK membatalkan play
+	LoadStartup()
+
+	if Mode==true then
+
+		return LoadRGB()
+
+	elseif Mode=="customba" then
+
+		return LoadCustomBA()
+
+	end
+
+	return LoadBadApple()
+
+end
+end
+
+local PlayMissingStartupSequence,PlayStartup
+do
+-- Bitmap 3x5 digit/huruf sederhana untuk overlay di grid
+local BITMAP_GLYPHS={
+	["0"]={"111","101","101","101","111"},
+	["1"]={"010","110","010","010","111"},
+	["2"]={"111","001","111","100","111"},
+	["3"]={"111","001","111","001","111"},
+	["4"]={"101","101","111","001","001"},
+	["5"]={"111","100","111","001","111"},
+	["6"]={"111","100","111","101","111"},
+	["7"]={"111","001","010","010","010"},
+	["8"]={"111","101","111","101","111"},
+	["9"]={"111","101","111","001","111"},
+	["A"]={"010","101","111","101","101"},
+	["B"]={"110","101","110","101","110"},
+	["D"]={"110","101","101","101","110"},
+	["E"]={"111","100","110","100","111"},
+	["F"]={"111","100","110","100","100"},
+	["N"]={"101","111","111","101","101"},
+	["O"]={"111","101","101","101","111"},
+	["R"]={"110","101","110","101","101"},
+	["S"]={"111","100","111","001","111"},
+	["T"]={"111","010","010","010","010"},
+	["U"]={"101","101","101","101","111"},
+	["!"]={"010","010","010","000","010"},
+	[" "]={"000","000","000","000","000"},
+}
+
+local function MakeTextRGBFrame(Message,Fg,Bg)
+	Fg=Fg or Color3.fromRGB(255,80,80)
+	Bg=Bg or Color3.fromRGB(10,10,12)
+	local Pixels=table.create(TOTAL_BLOCKS)
+	for i=1,TOTAL_BLOCKS do
+		Pixels[i]=Bg
+	end
+
+	local Msg=string.upper(tostring(Message or ""))
+	-- skala auto biar muat horizontal
+	local Scale=math.max(1,math.floor(math.min(X_SIZE,Y_SIZE)/12))
+	local function Measure(S,Sc)
+		return #S*((3*Sc)+Sc)-Sc,5*Sc
+	end
+	local TotalW,GlyphH=Measure(Msg,Scale)
+	while Scale>1 and (TotalW>X_SIZE-2 or GlyphH>Y_SIZE-2) do
+		Scale-=1
+		TotalW,GlyphH=Measure(Msg,Scale)
+	end
+	-- masih overflow → potong pesan
+	while #Msg>1 and TotalW>X_SIZE-2 do
+		Msg=Msg:sub(1,#Msg-1)
+		TotalW,GlyphH=Measure(Msg,Scale)
+	end
+
+	local GlyphW=3*Scale
+	local Gap=Scale
+	local StartX=math.floor((X_SIZE-TotalW)/2)
+	local StartY=math.floor((Y_SIZE-GlyphH)/2)
+
+	for Gi=1,#Msg do
+		local Ch=Msg:sub(Gi,Gi)
+		local Glyph=BITMAP_GLYPHS[Ch] or BITMAP_GLYPHS[" "]
+		local Ox=StartX+(Gi-1)*(GlyphW+Gap)
+		for Row=1,5 do
+			local Bits=Glyph[Row] or "000"
+			for Col=1,3 do
+				if Bits:sub(Col,Col)=="1" then
+					for Sy=0,Scale-1 do
+						for Sx=0,Scale-1 do
+							local X=Ox+(Col-1)*Scale+Sx
+							local Ytop=StartY+(Row-1)*Scale+Sy
+							if X>=0 and X<X_SIZE and Ytop>=0 and Ytop<Y_SIZE then
+								Pixels[Ytop*X_SIZE+X+1]=Fg
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return Pixels
+end
+
+function PlayMissingStartupSequence(Token)
+	Status.Text="404 STARTUP NOT FOUND!"
+	-- pesan pendek di grid kecil
+	local Line2=(X_SIZE>=40) and "NOT FOUND" or "NF"
+	local Frames={
+		MakeTextRGBFrame("404",Color3.fromRGB(255,70,70)),
+		MakeTextRGBFrame(Line2,Color3.fromRGB(255,120,80)),
+		MakeTextRGBFrame("3",Color3.fromRGB(255,220,80)),
+		MakeTextRGBFrame("2",Color3.fromRGB(255,220,80)),
+		MakeTextRGBFrame("1",Color3.fromRGB(120,255,120)),
+	}
+	local Durations={1.15,1.15,1.0,1.0,1.0}
+	local Labels={"404 STARTUP NOT FOUND!","404 STARTUP NOT FOUND!","COUNTDOWN 3","COUNTDOWN 2","COUNTDOWN 1"}
+	local First=true
+	for i,Frame in ipairs(Frames) do
+		if IsCancelled(Token) then
+			return false
+		end
+		Status.Text=Labels[i] or "404 STARTUP"
+		local t0=os.clock()
+		local OK=PaintFrame(Frame,First,Token,true,false)
+		if not OK then
+			return false
+		end
+		First=false
+		local WaitLeft=Durations[i]-(os.clock()-t0)
+		if WaitLeft>0 then
+			task.wait(WaitLeft)
+		end
+	end
+	return true
+end
+
+function PlayStartup(
+	Token
+)
+
+	if type(StartupFrames)~="table" or #StartupFrames==0 then
+		return false
+	end
+
+	-- kecepatan asli startup (tidak diubah pilihan FPS)
+	local SrcDelay=StartupFrameDelay or FRAME_DELAY
+	if not SrcDelay or SrcDelay<=0 then
+		SrcDelay=DEFAULT_FRAME_DELAY
+	end
+
+	-- pilihan FPS cuma ngatur frekuensi render (skip frame), maksimal = FPS asli
+	local RenderDelay=SrcDelay
+	if UserFpsOverride and UserFpsOverride>0 then
+		RenderDelay=math.max(SrcDelay,1/UserFpsOverride)
+	end
+
+	local Total=#StartupFrames
+	local StartTime=os.clock()
+	local NextAt=StartTime
+	local LastIndex=0
+	local FirstFrame=true
+
+	while true do
+
+		if IsCancelled(Token) then
+			return false
+		end
+
+		local Elapsed=os.clock()-StartTime
+
+		if Elapsed>=STARTUP_DURATION then
+			return true
+		end
+
+		-- frame dipilih berdasarkan WAKTU (looping), jadi durasi tetap walau FPS kecil
+		local FrameIndex=math.floor(Elapsed/SrcDelay)%Total+1
+
+		if FrameIndex~=LastIndex then
+
+			local OK=PaintFrame(
+				StartupFrames[FrameIndex],
+				FirstFrame,
+				Token,
+				true,
+				false
+			)
+
+			FirstFrame=false
+
+			if not OK then
+				return false
+			end
+
+			LastIndex=FrameIndex
+
+		end
+
+		Status.Text=string.format(
+			"STARTUP RGB %.1f/%.1f",
+			math.min(Elapsed,STARTUP_DURATION),
+			STARTUP_DURATION
+		)
+
+		NextAt=NextAt+RenderDelay
+		local Now=os.clock()
+
+		if NextAt<Now then
+			NextAt=Now
+		end
+
+		if NextAt>Now then
+			task.wait(NextAt-Now)
+		else
+			task.wait()
+		end
+
+	end
+
+end
+end
+
+local function PlayMode(
+	Mode
+)
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+		or
+		SettingPos
+	then
+
+		return
+
+	end
+
+	if
+		next(Blocks)==nil
+	then
+
+		Status.Text=
+			"BUILD OR SCAN FIRST"
+
+		return
+
+	end
+
+	if
+		not COLOR_ENABLED
+	then
+
+		Status.Text=
+			"COLOR OFF - tekan tombol COLOR dulu"
+
+		return
+
+	end
+
+	Playing=true
+
+	local Token=
+		NewRunToken()
+
+	ResetPixelState()
+
+	if Mode==true then
+
+		PlayRGBButton.Text=
+			"PREPARING RGB..."
+
+	elseif Mode=="customba" then
+
+		PlayCustomBAButton.Text=
+			"PREPARING..."
+
+	else
+
+		PlayBadAppleButton.Text=
+			"PREPARING..."
+
+	end
+
+	if
+		not PreparePlayback(
+			Mode
+		)
+	then
+
+		Playing=false
+
+		PlayBadAppleButton.Text=
+			"PLAY BAD APPLE"
+
+		PlayRGBButton.Text=
+			"RENDER RGB IMAGE"
+
+		PlayCustomBAButton.Text=
+			"PLAY CUSTOM BA"
+
+		return
+
+	end
+
+	if
+		IsCancelled(Token)
+	then
+
+		Playing=false
+		Status.Text="STOPPED"
+
+		return
+
+	end
+
+	if Mode==true then
+
+		PlayRGBButton.Text=
+			"STARTUP..."
+
+	elseif Mode=="customba" then
+
+		PlayCustomBAButton.Text=
+			"STARTUP..."
+
+	else
+
+		PlayBadAppleButton.Text=
+			"STARTUP..."
+
+	end
+
+	local StartupOK=true
+	if StartupMissing or type(StartupFrames)~="table" or #StartupFrames==0 then
+		StartupOK=PlayMissingStartupSequence(Token)
+	else
+		StartupOK=PlayStartup(Token)
+	end
+
+	if not StartupOK then
+
+		Playing=false
+
+		PlayBadAppleButton.Text=
+			"PLAY BAD APPLE"
+
+		PlayRGBButton.Text=
+			"RENDER RGB IMAGE"
+
+		PlayCustomBAButton.Text=
+			"PLAY CUSTOM BA"
+
+		Status.Text="STOPPED"
+
+		return
+
+	end
+
+	if
+		IsCancelled(Token)
+	then
+
+		Playing=false
+		Status.Text="STOPPED"
+
+		return
+
+	end
+
+	local Frames
+	local Label
+	local RGBMode
+
+	if Mode==true then
+
+		Frames=RGBFrames
+		Label="RGB"
+		RGBMode=true
+
+	elseif Mode=="customba" then
+
+		Frames=CustomBAFrames
+		Label="CUSTOM BA"
+		RGBMode=false
+
+	else
+
+		Frames=BadAppleFrames
+		Label="BAD APPLE"
+		RGBMode=false
+
+	end
+
+	-- pakai FPS konten utama (bukan startup)
+	FRAME_DELAY=MainFrameDelay or FRAME_DELAY
+	if not FRAME_DELAY or FRAME_DELAY<=0 then
+		FRAME_DELAY=DEFAULT_FRAME_DELAY
+	end
+
+	local FirstMainFrame=true
+
+	if type(Frames)~="table" or #Frames==0 then
+		Playing=false
+		Status.Text="NO FRAMES"
+		PlayBadAppleButton.Text="PLAY BAD APPLE"
+		PlayRGBButton.Text="RENDER RGB IMAGE"
+		PlayCustomBAButton.Text="PLAY CUSTOM BA"
+		return
+	end
+
+	-- Timeline ngikut kecepatan ASLI konten (FRAME_DELAY = 1/fps header, atau 20 default).
+	-- FPS pilihan user cuma ngatur seberapa sering render: frame yang kelewat di-SKIP,
+	-- jadi durasi video tetap sama (bukan slow motion).
+	local SrcDelay=FRAME_DELAY
+	local RenderDelay=SrcDelay
+
+	if UserFpsOverride and UserFpsOverride>0 then
+		RenderDelay=math.max(SrcDelay,1/UserFpsOverride)
+	end
+
+	local TotalFrames=#Frames
+	local PlayStart=os.clock()
+	local NextAt=PlayStart
+	local LastIndex=0
+
+	while true do
+
+		if IsCancelled(Token) then
+			break
+		end
+
+		local FrameNumber=math.floor((os.clock()-PlayStart)/SrcDelay)+1
+
+		if FrameNumber>TotalFrames then
+			break
+		end
+
+		if FrameNumber~=LastIndex then
+
+			local OK=PaintFrame(
+				Frames[FrameNumber],
+				FirstMainFrame,
+				Token,
+				RGBMode,
+				RGBMode
+			)
+
+			FirstMainFrame=false
+
+			if not OK then
+				break
+			end
+
+			LastIndex=FrameNumber
+
+			Status.Text=string.format(
+				"%s %d/%d",
+				Label,
+				FrameNumber,
+				TotalFrames
+			)
+
+		end
+
+		NextAt=NextAt+RenderDelay
+		local Now=os.clock()
+
+		if NextAt<Now then
+			NextAt=Now
+		end
+
+		if NextAt>Now then
+			task.wait(NextAt-Now)
+		else
+			task.wait()
+		end
+
+	end
+
+	Playing=false
+
+	Status.Text=
+		IsCancelled(Token)
+		and
+		"STOPPED"
+		or
+		"PLAYBACK FINISHED"
+
+	PlayBadAppleButton.Text=
+		"PLAY BAD APPLE"
+
+	PlayRGBButton.Text=
+		"RENDER RGB IMAGE"
+
+	PlayCustomBAButton.Text=
+		"PLAY CUSTOM BA"
+
+	StopRequested=false
+
+end
+
+-- AUTO = header file, atau 20 FPS kalau tanpa header
+-- Angka lebih rendah = jeda lebih lama (terlihat seperti frame skip) — sengaja
+local FpsPresets={"AUTO",5,8,10,12,15,20,24,30}
+local FpsPresetIndex=1
+
+local function RefreshFpsButton()
+	if UserFpsOverride then
+		FpsButton.Text="FPS : "..tostring(UserFpsOverride).." (skip)"
+	else
+		FpsButton.Text="FPS : AUTO"
+	end
+end
+
+FpsButton.Activated:Connect(function()
+	if Building or Playing or Scanning or Deleting then
+		return
+	end
+	FpsPresetIndex=FpsPresetIndex%#FpsPresets+1
+	local Pick=FpsPresets[FpsPresetIndex]
+	if Pick=="AUTO" then
+		UserFpsOverride=nil
+	else
+		UserFpsOverride=Pick
+	end
+	table.clear(PreviousPixels)
+	RefreshFpsButton()
+	Status.Text=UserFpsOverride
+		and ("FPS "..UserFpsOverride.." → frame di-skip, durasi tetap")
+		or ("FPS AUTO → ikut header / default "..DEFAULT_FPS)
+end)
+
+local SizePresets={
+	{51,39},
+	{32,24},
+	{40,30},
+	{64,36},
+	{64,48},
+	{80,45},
+}
+local SizePresetIndex=1
+
+local function RefreshSizeButtons()
+	SizeButton.Text=string.format("SIZE : %d × %d",X_SIZE,Y_SIZE)
+	BuildButton.Text=string.format("BUILD %d × %d",X_SIZE,Y_SIZE)
+	PosHint.Text=string.format("Bottom-left corner of %d×%d grid",X_SIZE,Y_SIZE)
+end
+
+SizeButton.Activated:Connect(function()
+	if Building or Playing or Scanning or Deleting or SettingPos then
+		return
+	end
+	SizePresetIndex=SizePresetIndex%#SizePresets+1
+	X_SIZE=SizePresets[SizePresetIndex][1]
+	Y_SIZE=SizePresets[SizePresetIndex][2]
+	RecalcGridSize()
+	table.clear(Blocks)
+	ClearMediaCaches()
+	RefreshSizeButtons()
+	Status.Text=string.format("GRID %d×%d — BUILD ulang",X_SIZE,Y_SIZE)
+end)
+
+RefreshFpsButton()
+RefreshSizeButtons()
+
+-- Jalankan fungsi berat dengan pengaman: kalau error, flag busy di-reset (tombol gak macet)
+local function SafeRun(Name,Fn,...)
+	local OK,Err=pcall(Fn,...)
+	if not OK then
+		warn("[PixelBuilder] "..Name.." ERROR: "..tostring(Err))
+		Building=false
+		Playing=false
+		Scanning=false
+		Deleting=false
+		StopRequested=false
+		PlayBadAppleButton.Text="PLAY BAD APPLE"
+		PlayRGBButton.Text="RENDER RGB IMAGE"
+		PlayCustomBAButton.Text="PLAY CUSTOM BA"
+		Status.Text="ERROR "..Name..": "..string.sub(tostring(Err),1,80)
+	end
+end
+
+BlockIDButton.Activated:Connect(function()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	IDBox.Text=
+		BLOCK_ID
+
+	IDWindow.Visible=true
+
+	IDBox:CaptureFocus()
+
+end)
+
+IDConfirm.Activated:Connect(function()
+
+	local NewID=
+		IDBox.Text
+
+	NewID=
+		NewID:gsub(
+			"%s",
+			""
+		)
+
+	if
+		NewID==""
+		or
+		not NewID:match(
+			"^%d+$"
+		)
+	then
+
+		Status.Text=
+			"INVALID BLOCK ID"
+
+		return
+
+	end
+
+	BLOCK_ID=
+		NewID
+
+	BlockIDButton.Text=
+		"BLOCK ID : "..BLOCK_ID
+
+	IDWindow.Visible=false
+
+	Status.Text=
+		"BLOCK ID UPDATED"
+
+end)
+
+BrightnessButton.Activated:Connect(function()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	BrightnessBox.Text=
+		tostring(
+		CUSTOM_BRIGHTNESS
+	)
+
+	BrightnessWindow.Visible=
+		true
+
+	BrightnessBox:CaptureFocus()
+
+end)
+
+BrightnessConfirm.Activated:Connect(function()
+
+	local Value=
+		BrightnessBox.Text
+
+	Value=
+		Value:gsub(
+			"%s",
+			""
+		)
+
+	local Number=
+		tonumber(
+			Value
+		)
+
+	if
+		not Number
+	then
+
+		Status.Text=
+			"INVALID BRIGHTNESS"
+
+		return
+
+	end
+
+	Number=
+		math.floor(
+			Number
+		)
+
+	if
+		Number<0
+	then
+
+		Number=0
+
+	end
+
+	CUSTOM_BRIGHTNESS=
+		Number
+
+	BrightnessButton.Text=
+		"BRIGHTNESS : +"
+		..CUSTOM_BRIGHTNESS
+
+	BrightnessWindow.Visible=
+		false
+
+	table.clear(
+		PreviousPixels
+	)
+
+	Status.Text=
+		"BRIGHTNESS : +"
+		..CUSTOM_BRIGHTNESS
+
+end)
+
+BuildButton.Activated:Connect(function()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"BuildGrid",BuildGrid)
+
+end)
+
+ColorButton.Activated:Connect(function()
+
+	COLOR_ENABLED=
+		not COLOR_ENABLED
+
+	ColorButton.Text=
+		COLOR_ENABLED
+		and
+		"COLOR : ON"
+		or
+		"COLOR : OFF"
+
+end)
+
+PlayBadAppleButton.Activated:Connect(function()
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"PlayMode",PlayMode,false)
+
+end)
+
+PlayRGBButton.Activated:Connect(function()
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"PlayMode",PlayMode,true)
+
+end)
+
+PlayCustomBAButton.Activated:Connect(function()
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"PlayMode",PlayMode,"customba")
+
+end)
+
+RGBURLButton.Activated:Connect(function()
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	URLBox.Text=
+		RGB_URL
+
+	URLWindow.Visible=true
+
+	URLBox:CaptureFocus()
+
+end)
+
+ConfirmButton.Activated:Connect(function()
+
+	local NewURL=
+		URLBox.Text
+
+	NewURL=
+		NewURL:gsub(
+			"^%s+",
+			""
+		)
+
+	NewURL=
+		NewURL:gsub(
+			"%s+$",
+			""
+		)
+
+	if
+		NewURL==""
+	then
+
+		Status.Text=
+			"RGB URL EMPTY"
+
+		return
+
+	end
+
+	if NewURL:match("^%d+%s*,%s*%d+%s*,%s*%d+") then
+		RGB_DATA=NewURL
+		RGB_URL=""
+	else
+		RGB_URL=NewURL
+		RGB_DATA=""
+	end
+
+	RGBFrames=nil
+	table.clear(PreviousPixels)
+
+	URLWindow.Visible=false
+
+	Status.Text=
+		(RGB_DATA~="" and "RGB DATA READY" or "RGB URL UPDATED")
+
+end)
+
+SetPosButton.Activated:Connect(function()
+
+	if Building
+		or Playing
+		or Scanning
+		or Deleting
+	then
+		return
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	EnterSetPosMode()
+
+end)
+
+PosConfirmBtn.Activated:Connect(function()
+
+	START_X=PendingStartX
+	START_Y=PendingStartY
+	START_Z=PendingStartZ
+
+	table.clear(Blocks)
+	table.clear(PreviousPixels)
+
+	ExitSetPosMode()
+
+	Status.Text=
+		string.format(
+			"ORIGIN SET  %d %d %d",
+			START_X,
+			START_Y,
+			START_Z
+		)
+
+	Dbg("ORIGIN:",START_X,START_Y,START_Z)
+
+end)
+
+PosCancelBtn.Activated:Connect(function()
+
+	PosWindow.Visible=false
+	Status.Text=
+		"SET POS — click a cell"
+
+end)
+
+BAURLButton.Activated:Connect(function()
+
+	if
+		Playing
+		or
+		Building
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	BAURLBox.Text=
+		CUSTOM_BA_URL
+
+	BAURLWindow.Visible=true
+
+	BAURLBox:CaptureFocus()
+
+end)
+
+BAConfirmButton.Activated:Connect(function()
+
+	local NewURL=
+		BAURLBox.Text
+
+	NewURL=
+		NewURL:gsub(
+			"^%s+",
+			""
+		)
+
+	NewURL=
+		NewURL:gsub(
+			"%s+$",
+			""
+		)
+
+	if
+		NewURL==""
+	then
+
+		Status.Text=
+			"BA URL EMPTY"
+
+		return
+
+	end
+
+	CUSTOM_BA_URL=
+		NewURL
+
+	CustomBAFrames=nil
+	table.clear(PreviousPixels)
+
+	BAURLWindow.Visible=false
+
+	Status.Text=
+		"BA URL UPDATED"
+
+end)
+
+ScanButton.Activated:Connect(function()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"ScanBlocks",ScanBlocks)
+
+end)
+
+DeleteButton.Activated:Connect(function()
+
+	if
+		Building
+		or
+		Playing
+		or
+		Scanning
+		or
+		Deleting
+	then
+
+		return
+
+	end
+
+	if not DepsReady() then
+		return
+	end
+
+	task.spawn(SafeRun,"DeleteAllBlocks",DeleteAllBlocks)
+
+end)
+
+StopButton.Activated:Connect(function()
+
+	CancelRun()
+
+	IDWindow.Visible=false
+	BrightnessWindow.Visible=false
+	URLWindow.Visible=false
+	BAURLWindow.Visible=false
+	PosWindow.Visible=false
+
+	if SettingPos then
+		ExitSetPosMode()
+	end
+
+	Status.Text=
+		"STOPPING..."
+
+	PlayBadAppleButton.Text=
+		"PLAY BAD APPLE"
+
+	PlayRGBButton.Text=
+		"RENDER RGB IMAGE"
+
+	PlayCustomBAButton.Text=
+		"PLAY CUSTOM BA"
+
+end)
+
+Dbg("BUILD LOGIC BAD APPLE | Grid",X_SIZE,"x",Y_SIZE,"| Total",TOTAL_BLOCKS)
+print("[PixelBuilder] GUI ready")
